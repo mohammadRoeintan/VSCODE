@@ -35,21 +35,32 @@ def main():
     # g = build_graph(all_train_seq)
     
     # اگر داده به صورت تاپل بارگذاری شده باشد
+    # استخراج سشن‌ها و تارگت‌ها
     if isinstance(train_data, tuple):
-        print("Data is a tuple, extracting sessions...")
-        sessions = train_data[0]  # اولین عنصر تاپل را می‌گیریم
-        print(f"Total sessions extracted: {len(sessions)}")
-        print("Sample session:", sessions[0])  # نمایش یک سشن نمونه
+        print("Data is a tuple, extracting sessions and targets...")
+        sessions, targets = train_data
+        print(f"Number of sessions: {len(sessions)}")
+        print(f"Number of targets: {len(targets)}")
     else:
         sessions = train_data
+        targets = [...]  # اگر تارگت‌ها جداگانه هستند
+    
+    # بررسی نمونه داده
+    print("Sample session:", sessions[0])
+    print("Sample target:", targets[0] if len(targets) > 0 else "None")
+    
     # ساخت گراف
     adj_in, adj_out = build_graph(sessions)
     
     # ایجاد شیء Data
-    train_data = Data((sessions, train_data[1]), shuffle=True)  # اگر train_data تاپل بود
-    # یا
-    # train_data = Data(train_data, shuffle=True)  # اگر لیست سشن‌ها بود
-    
+    try:
+        train_data = Data((sessions, targets), shuffle=True)
+        print("Data object created successfully")
+    except Exception as e:
+        print("Error creating Data object:")
+        print("Sessions type:", type(sessions))
+        print("Targets type:", type(targets))
+        raise e
     test_data = Data(test_data, shuffle=False)
     # del all_train_seq, g
     if opt.dataset == 'diginetica':
