@@ -36,7 +36,7 @@ def main():
     
     # اگر داده به صورت تاپل بارگذاری شده باشد
     # استخراج سشن‌ها و تارگت‌ها
-        if isinstance(train_data, tuple):
+    if isinstance(train_data, tuple):
         print("Data is a tuple, extracting sessions and targets...")
         sessions, targets = train_data
         print(f"Number of sessions: {len(sessions)}")
