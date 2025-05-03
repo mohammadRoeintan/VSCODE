@@ -260,8 +260,15 @@ def train_test(model, train_data, test_data):
         sub_scores = scores.topk(20)[1]
         sub_scores = trans_to_cpu(sub_scores).detach().numpy()
         # محاسبه Hit Rate و MRR مثل قبل
-        targets_cpu = trans_to_cpu(targets).detach().numpy() # اضافه شد برای دسترسی به mask
+        if isinstance(targets, torch.Tensor):
+            targets_cpu = targets.cpu().detach().numpy()
+        else:
+            targets_cpu = targets # اضافه شد برای دسترسی به mask
         mask_cpu = trans_to_cpu(test_data.mask[i]).detach().numpy() # اضافه شد
+        if isinstance(test_data.mask[i], torch.Tensor):
+            mask_cpu = test_data.mask[i].cpu().detach().numpy()
+        else:
+            mask_cpu = test_data.mask[i]
 
         for score, target, mask_row in zip(sub_scores, targets_cpu, mask_cpu): # mask اضافه شد
              # اطمینان از اینکه target معتبر است (در برخی موارد ممکن است 0 باشد اگر ورودی خالی باشد)
