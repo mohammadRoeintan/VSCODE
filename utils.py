@@ -4,12 +4,21 @@ import numpy as np
 
 from scipy.sparse import lil_matrix, csr_matrix
 
+from scipy.sparse import lil_matrix, csr_matrix
+
 def build_graph(train_data):
-    max_node = max(max(seq) for seq in train_data) + 1
+    # ابتدا بررسی می‌کنیم که آیا train_data یک تاپل است یا خیر
+    if isinstance(train_data, tuple):
+        # اگر تاپل بود، اولین عنصر آن را که لیست سشن‌هاست برمی‌داریم
+        sessions = train_data[0]
+    else:
+        sessions = train_data
+    
+    max_node = max(max(seq) for seq in sessions) + 1
     adj_in = lil_matrix((max_node, max_node))
     adj_out = lil_matrix((max_node, max_node))
     
-    for seq in train_data:
+    for seq in sessions:
         for i in range(len(seq) - 1):
             u, v = seq[i], seq[i + 1]
             adj_out[u, v] += 1
