@@ -95,3 +95,4 @@ class Data():
             A.append(u_A)
             alias_inputs.append([np.where(node == i)[0][0] for i in u_input])
         return alias_inputs, A, items, mask, targets
+ 
