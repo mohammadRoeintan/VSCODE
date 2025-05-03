@@ -23,12 +23,12 @@ print(opt)
 
 
 def main():
-    train_data = pickle.load(open('/kaggle/working/TAGNN/datasets/' + opt.dataset + '/train.txt', 'rb'))
+    train_data = pickle.load(open('../datasets/' + opt.dataset + '/train.txt', 'rb'))
     if opt.validation:
         train_data, valid_data = split_validation(train_data, opt.valid_portion)
         test_data = valid_data
     else:
-        test_data = pickle.load(open('/kaggle/working/TAGNN/datasets/' + opt.dataset + '/test.txt', 'rb'))
+        test_data = pickle.load(open('../datasets/' + opt.dataset + '/test.txt', 'rb'))
     # all_train_seq = pickle.load(open('../datasets/' + opt.dataset + '/all_train_seq.txt', 'rb'))
     # g = build_graph(all_train_seq)
     train_data = Data(train_data, shuffle=True)
