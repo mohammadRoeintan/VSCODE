@@ -24,9 +24,8 @@ print(opt)
 
 def main():
     train_data = pickle.load(open('/kaggle/working/TAGNN/datasets/' + opt.dataset + '/train.txt', 'rb'))
-    print(type(train_data))  # باید <class 'list'> باشد
-    print(type(train_data[0]))  # باید <class 'list'> باشد
-    print(train_data[:2])  # 
+    print("Structure of loaded data:", type(train_data))  # برای دیباگ
+    
     if opt.validation:
         train_data, valid_data = split_validation(train_data, opt.valid_portion)
         test_data = valid_data
@@ -34,8 +33,20 @@ def main():
         test_data = pickle.load(open('/kaggle/working/TAGNN/datasets/' + opt.dataset + '/test.txt', 'rb'))
     # all_train_seq = pickle.load(open('../datasets/' + opt.dataset + '/all_train_seq.txt', 'rb'))
     # g = build_graph(all_train_seq)
-    adj_in, adj_out = build_graph(train_data)
-    train_data = Data(train_data, shuffle=True, graph=(adj_in, adj_out))
+    
+    # اگر داده به صورت تاپل بارگذاری شده باشد
+    if isinstance(train_data, tuple):
+        print("Data is a tuple, extracting sessions...")
+        sessions = train_data[0]  # اولین عنصر تاپل را می‌گیریم
+    else:
+        sessions = train_data
+    # ساخت گراف
+    adj_in, adj_out = build_graph(sessions)
+    
+    # ایجاد شیء Data
+    train_data = Data((sessions, train_data[1]), shuffle=True)  # اگر train_data تاپل بود
+    # یا
+    # train_data = Data(train_data, shuffle=True)  # اگر لیست سشن‌ها بود
     
     test_data = Data(test_data, shuffle=False)
     # del all_train_seq, g
