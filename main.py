@@ -31,7 +31,8 @@ def main():
         test_data = pickle.load(open('/kaggle/working/TAGNN/datasets/' + opt.dataset + '/test.txt', 'rb'))
     # all_train_seq = pickle.load(open('../datasets/' + opt.dataset + '/all_train_seq.txt', 'rb'))
     # g = build_graph(all_train_seq)
-    train_data = Data(train_data, shuffle=True)
+    adj_in, adj_out = build_graph(train_data)
+    train_data = Data(train_data, shuffle=True, graph=(adj_in, adj_out))
     test_data = Data(test_data, shuffle=False)
     # del all_train_seq, g
     if opt.dataset == 'diginetica':
