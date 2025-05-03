@@ -211,13 +211,21 @@ def forward(model, i, data):
     hidden = model.gnn(A, hidden)
 
     # برداری‌سازی به جای حلقه‌های Python
+   
     seq_hidden = hidden[torch.arange(len(alias_inputs)).unsqueeze(1), alias_inputs]
-    seq_hidden = seq_hidden.transpose(0, 1)  # (seq_len, batch, hidden_size)
-
-    # Transformer
-    seq_hidden = model.pos_encoder(seq_hidden)
-    src_key_padding_mask = (mask == 0)
-    hidden_transformer = model.transformer_encoder(seq_hidden, src_key_padding_mask=src_key_padding_mask)
+    seq_hidden = seq_hidden  # شکل: (batch_size, seq_length, hidden_size)
+    
+    # اعمال Positional Encoding
+    seq_hidden_pos = model.pos_encoder(seq_hidden.transpose(0, 1)).transpose(0, 1)
+    
+    # ساخت ماسک
+    src_key_padding_mask = (mask == 0)  # شکل: (batch_size, seq_length)
+    
+    # اجرای Transformer
+    hidden_transformer_output = model.transformer_encoder(
+        seq_hidden_pos,
+        src_key_padding_mask=src_key_padding_mask
+    )
     
     return targets, model.compute_scores(hidden_transformer, mask)
 # ---------------------------------------------------------------------
