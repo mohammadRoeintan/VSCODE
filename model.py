@@ -25,6 +25,7 @@ class PositionalEncoding(Module):
     Examples:
         >>> pos_encoder = PositionalEncoding(d_model)
     """
+    
 
     def __init__(self, d_model, dropout=0.1, max_len=5000):
         super(PositionalEncoding, self).__init__()
@@ -207,19 +208,18 @@ def forward(model, i, data):
     A = trans_to_cuda(torch.tensor(np.array(A)).float())
     mask = trans_to_cuda(torch.Tensor(mask).long())
 
+    # اجرای GNN
     hidden = model.embedding(items)
     hidden = model.gnn(A, hidden)
 
     # برداری‌سازی به جای حلقه‌های Python
-   
-    seq_hidden = hidden[torch.arange(len(alias_inputs)).unsqueeze(1), alias_inputs]
-    seq_hidden = seq_hidden  # شکل: (batch_size, seq_length, hidden_size)
+    seq_hidden = hidden[torch.arange(len(alias_inputs)).unsqueeze(1), alias_inputs]  # (batch_size, seq_length, hidden_size)
     
     # اعمال Positional Encoding
-    seq_hidden_pos = model.pos_encoder(seq_hidden.transpose(0, 1)).transpose(0, 1)
+    seq_hidden_pos = model.pos_encoder(seq_hidden.transpose(0, 1)).transpose(0, 1)  # (batch_size, seq_length, hidden_size)
     
     # ساخت ماسک
-    src_key_padding_mask = (mask == 0)  # شکل: (batch_size, seq_length)
+    src_key_padding_mask = (mask == 0)  # (batch_size, seq_length)
     
     # اجرای Transformer
     hidden_transformer_output = model.transformer_encoder(
@@ -227,7 +227,7 @@ def forward(model, i, data):
         src_key_padding_mask=src_key_padding_mask
     )
     
-    return targets, model.compute_scores(hidden_transformer, mask)
+    return targets, model.compute_scores(hidden_transformer_output, mask)
 # ---------------------------------------------------------------------
 
 
