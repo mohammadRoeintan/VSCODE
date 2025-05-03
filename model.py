@@ -233,7 +233,7 @@ from torch.cuda.amp import autocast, GradScaler
  
 
 def train_test(model, train_data, test_data):
-    scaler = GradScaler(device_type='cuda')  # تغییر به سینتکس جدید
+    scaler = GradScaler()  # تغییر به سینتکس جدید
     model.train()
     total_loss = 0.0
     slices = train_data.generate_batch(model.batch_size)
