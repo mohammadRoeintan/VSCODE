@@ -208,22 +208,19 @@ def forward(model, i, data):
     A = trans_to_cuda(torch.tensor(np.array(A)).float())
     mask = trans_to_cuda(torch.Tensor(mask).long())
 
-    # اجرای GNN
     hidden = model.embedding(items)
     hidden = model.gnn(A, hidden)
 
-    # برداری‌سازی به جای حلقه‌های Python
-    seq_hidden = hidden[torch.arange(len(alias_inputs)).unsqueeze(1), alias_inputs]  # (batch_size, seq_length, hidden_size)
+    # برداری‌سازی و اعمال Positional Encoding
+    seq_hidden = hidden[torch.arange(len(alias_inputs)).unsqueeze(1), alias_inputs]  # (batch_size, seq_len, hidden_size)
+    seq_hidden_pos = model.pos_encoder(seq_hidden.transpose(0, 1)).transpose(0, 1)  # (batch_size, seq_len, hidden_size)
     
-    # اعمال Positional Encoding
-    seq_hidden_pos = model.pos_encoder(seq_hidden.transpose(0, 1)).transpose(0, 1)  # (batch_size, seq_length, hidden_size)
+    # ساخت ماسک با شکل صحیح (batch_size, seq_len)
+    src_key_padding_mask = (mask == 0)
     
-    # ساخت ماسک
-    src_key_padding_mask = (mask == 0)  # (batch_size, seq_length)
- 
     # اجرای Transformer
     hidden_transformer_output = model.transformer_encoder(
-        seq_hidden_pos,
+        src=seq_hidden_pos,
         src_key_padding_mask=src_key_padding_mask
     )
     
@@ -233,18 +230,20 @@ def forward(model, i, data):
 
 from torch.cuda.amp import autocast, GradScaler
 
+from torch.amp import GradScaler, autocast
+
 def train_test(model, train_data, test_data):
-    scaler = GradScaler()
+    scaler = GradScaler(device_type='cuda')  # تغییر به سینتکس جدید
     model.train()
     total_loss = 0.0
     slices = train_data.generate_batch(model.batch_size)
     for i, j in zip(slices, np.arange(len(slices))):
         model.optimizer.zero_grad()
-        with autocast():  # فعال‌سازی Mixed Precision
+        with autocast(device_type='cuda', dtype=torch.float16):  # تغییر به سینتکس جدید
             targets, scores = forward(model, i, train_data)
             targets = trans_to_cuda(torch.Tensor(targets).long())
             loss = model.loss_function(scores, targets - 1)
-        scaler.scale(loss).backward()  # جایگزین loss.backward()
+        scaler.scale(loss).backward()
         scaler.step(model.optimizer)
         scaler.update()
         total_loss += loss.item()
