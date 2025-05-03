@@ -36,11 +36,24 @@ def build_graph(train_data):
 
 
 def data_masks(all_usr_pois, item_tail):
-    us_lens = torch.tensor([len(upois) for upois in all_usr_pois])
-    len_max = us_lens.max().item()
+    us_lens = [len(upois) for upois in all_usr_pois]
+    len_max = max(us_lens)
+    
+    # تبدیل به لیست‌های پد شده
     us_pois = [upois + [item_tail] * (len_max - len(upois)) for upois in all_usr_pois]
     us_msks = [[1] * le + [0] * (len_max - le) for le in us_lens]
-    return torch.tensor(us_pois), torch.tensor(us_msks), len_max
+    
+    # تبدیل به تانسور
+    try:
+        us_pois_tensor = torch.tensor(us_pois, dtype=torch.long)
+        us_msks_tensor = torch.tensor(us_msks, dtype=torch.long)
+    except Exception as e:
+        print("Error in tensor conversion:")
+        print("Sample us_pois:", us_pois[:2])
+        print("Sample us_msks:", us_msks[:2])
+        raise e
+    
+    return us_pois_tensor, us_msks_tensor, len_max
 
 
 def split_validation(train_set, valid_portion):
