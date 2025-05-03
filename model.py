@@ -239,7 +239,7 @@ def train_test(model, train_data, test_data):
     slices = train_data.generate_batch(model.batch_size)
     for i, j in zip(slices, np.arange(len(slices))):
         model.optimizer.zero_grad()
-        with autocast(device_type='cuda', dtype=torch.float16):  # تغییر به سینتکس جدید
+        with autocast(  dtype=torch.float16):  # تغییر به سینتکس جدید
             targets, scores = forward(model, i, train_data)
             targets = trans_to_cuda(torch.Tensor(targets).long())
             loss = model.loss_function(scores, targets - 1)
