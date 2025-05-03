@@ -39,19 +39,14 @@ def data_masks(all_usr_pois, item_tail):
     us_lens = [len(upois) for upois in all_usr_pois]
     len_max = max(us_lens)
     
-    # ایجاد لیست‌های پد شده با اعداد صحیح (نه لیست‌های تودرتو)
-    us_pois = []
-    for upois in all_usr_pois:
-        # تبدیل هر آیتم به عدد صحیح اگر لیست است
-        padded = []
-        for item in upois:
-            if isinstance(item, list):
-                padded.append(item[0])  # اگر لیست است، اولین عنصر را بگیرید
-            else:
-                padded.append(item)
-        # اضافه کردن padding
-        padded += [item_tail] * (len_max - len(upois))
-        us_pois.append(padded)
+    # پد کردن با عدد 0 به جای لیست [0]
+    us_pois = [upois + [item_tail] * (len_max - len(upois)) for upois in all_usr_pois]
+    
+    # حذف لیست‌های تودرتو (اگر وجود دارد)
+    us_pois = [
+        [item[0] if isinstance(item, list) else item 
+        for item in session
+    ] for session in us_pois]
     
     us_msks = [[1] * le + [0] * (len_max - le) for le in us_lens]
     
