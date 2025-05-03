@@ -24,7 +24,7 @@ print(opt)
 
 def main():
     train_data = pickle.load(open('/kaggle/working/TAGNN/datasets/' + opt.dataset + '/train.txt', 'rb'))
-    print("Structure of loaded data:", type(train_data))
+     
     
     if opt.validation:
         train_data, valid_data = split_validation(train_data, opt.valid_portion)
