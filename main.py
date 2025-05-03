@@ -24,6 +24,9 @@ print(opt)
 
 def main():
     train_data = pickle.load(open('/kaggle/working/TAGNN/datasets/' + opt.dataset + '/train.txt', 'rb'))
+    print(type(train_data))  # باید <class 'list'> باشد
+    print(type(train_data[0]))  # باید <class 'list'> باشد
+    print(train_data[:2])  # 
     if opt.validation:
         train_data, valid_data = split_validation(train_data, opt.valid_portion)
         test_data = valid_data
@@ -33,9 +36,7 @@ def main():
     # g = build_graph(all_train_seq)
     adj_in, adj_out = build_graph(train_data)
     train_data = Data(train_data, shuffle=True, graph=(adj_in, adj_out))
-    print(type(train_data))  # باید <class 'list'> باشد
-    print(type(train_data[0]))  # باید <class 'list'> باشد
-    print(train_data[:2])  # 
+    
     test_data = Data(test_data, shuffle=False)
     # del all_train_seq, g
     if opt.dataset == 'diginetica':
