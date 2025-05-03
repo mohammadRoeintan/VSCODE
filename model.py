@@ -230,7 +230,7 @@ def forward(model, i, data):
 
 from torch.cuda.amp import autocast, GradScaler
 
-from torch.amp import GradScaler, autocast
+ 
 
 def train_test(model, train_data, test_data):
     scaler = GradScaler(device_type='cuda')  # تغییر به سینتکس جدید
