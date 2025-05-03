@@ -220,8 +220,7 @@ def forward(model, i, data):
     
     # ساخت ماسک
     src_key_padding_mask = (mask == 0)  # (batch_size, seq_length)
-    print("seq_hidden_pos shape:", seq_hidden_pos.shape)
-    print("src_key_padding_mask shape:", src_key_padding_mask.shape)
+ 
     # اجرای Transformer
     hidden_transformer_output = model.transformer_encoder(
         seq_hidden_pos,
