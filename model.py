@@ -264,7 +264,7 @@ def train_test(model, train_data, test_data):
             targets_cpu = targets.cpu().detach().numpy()
         else:
             targets_cpu = targets # اضافه شد برای دسترسی به mask
-        mask_cpu = trans_to_cpu(test_data.mask[i]).detach().numpy() # اضافه شد
+         
         if isinstance(test_data.mask[i], torch.Tensor):
             mask_cpu = test_data.mask[i].cpu().detach().numpy()
         else:
