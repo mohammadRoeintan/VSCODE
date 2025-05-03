@@ -38,8 +38,8 @@ def main():
     if isinstance(train_data, tuple):
         print("Data is a tuple, extracting sessions...")
         sessions = train_data[0]  # اولین عنصر تاپل را می‌گیریم
-    print(f"Total sessions extracted: {len(sessions)}")
-    print("Sample session:", sessions[0])  # نمایش یک سشن نمونه
+        print(f"Total sessions extracted: {len(sessions)}")
+        print("Sample session:", sessions[0])  # نمایش یک سشن نمونه
     else:
         sessions = train_data
     # ساخت گراف
