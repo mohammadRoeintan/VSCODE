@@ -24,25 +24,25 @@ print(opt)
 
 def main():
     train_data = pickle.load(open('/kaggle/working/TAGNN/datasets/' + opt.dataset + '/train.txt', 'rb'))
-    print("Structure of loaded data:", type(train_data))  # برای دیباگ
+    print("Structure of loaded data:", type(train_data))
     
     if opt.validation:
         train_data, valid_data = split_validation(train_data, opt.valid_portion)
         test_data = valid_data
     else:
         test_data = pickle.load(open('/kaggle/working/TAGNN/datasets/' + opt.dataset + '/test.txt', 'rb'))
-    # all_train_seq = pickle.load(open('../datasets/' + opt.dataset + '/all_train_seq.txt', 'rb'))
-    # g = build_graph(all_train_seq)
     
-    # اگر داده به صورت تاپل بارگذاری شده باشد
     # استخراج سشن‌ها و تارگت‌ها
     if isinstance(train_data, tuple):
         sessions, targets = train_data
-        # تبدیل تمام آیتم‌های لیست به اعداد صحیح
+        # تبدیل آیتم‌های لیست به اعداد صحیح
         sessions = [
-            [int(item[0]) if isinstance(item, list) else int(item) 
-            for item in session
-        ] for session in sessions
+            [
+                int(item[0]) if isinstance(item, list) else int(item) 
+                for item in session
+            ] 
+            for session in sessions
+        ]
     else:
         sessions = train_data
     
@@ -58,8 +58,9 @@ def main():
         print("Sample session:", sessions[0])
         print("Sample target:", targets[0] if len(targets) > 0 else "None")
         raise e
+
     test_data = Data(test_data, shuffle=False)
-    # del all_train_seq, g
+    
     if opt.dataset == 'diginetica':
         n_node = 43098
     elif opt.dataset == 'yoochoose1_64' or opt.dataset == 'yoochoose1_4':
