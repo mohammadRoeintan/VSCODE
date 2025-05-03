@@ -207,50 +207,38 @@ def forward(model, i, data):
     A = trans_to_cuda(torch.tensor(np.array(A)).float())
     mask = trans_to_cuda(torch.Tensor(mask).long())
 
-    # 1. گرفتن embedding اولیه و اجرای GNN (مانند قبل)
-    hidden_gnn_output = model(items, A) # خروجی GNN - shape: (batch, max_nodes_in_batch, hidden_size)
+    hidden = model.embedding(items)
+    hidden = model.gnn(A, hidden)
 
-    # 2. استخراج embedding های مربوط به توالی ورودی از خروجی GNN
-    get = lambda i: hidden_gnn_output[i][alias_inputs[i]]
-    seq_hidden_gnn = torch.stack([get(i) for i in torch.arange(len(alias_inputs)).long()])
-    # seq_hidden_gnn shape: (batch_size, seq_length, hidden_size)
+    # برداری‌سازی به جای حلقه‌های Python
+    seq_hidden = hidden[torch.arange(len(alias_inputs)).unsqueeze(1), alias_inputs]
+    seq_hidden = seq_hidden.transpose(0, 1)  # (seq_len, batch, hidden_size)
 
-    # --- 3. اعمال Positional Encoding و Transformer ---
-    # Transformer ورودی (seq_len, batch, embed_dim) یا (batch, seq_len, embed_dim) اگر batch_first=True
-    # ما batch_first=True را در TransformerEncoderLayer تنظیم کردیم
-    # PositionalEncoding به (seq_len, batch, embed_dim) نیاز دارد، پس transpose می کنیم
-    seq_hidden_pos = model.pos_encoder(seq_hidden_gnn.transpose(0, 1)).transpose(0, 1)
-
-    # ایجاد src_key_padding_mask برای Transformer
-    # در Transformer، مقدار True نشان دهنده پدینگ است و باید نادیده گرفته شود
-    src_key_padding_mask = (mask == 0) # برعکس mask قبلی
-
-    # اجرای Transformer Encoder
-    # توجه: ورودی باید (batch_size, seq_length, hidden_size) باشد چون batch_first=True
-    hidden_transformer_output = model.transformer_encoder(seq_hidden_pos, src_key_padding_mask=src_key_padding_mask)
-    # hidden_transformer_output shape: (batch_size, seq_length, hidden_size)
-    # --------------------------------------------------
-
-    # 4. محاسبه امتیازات با استفاده از خروجی Transformer
-    # تابع compute_scores حالا خروجی transformer را می گیرد
-    return targets, model.compute_scores(hidden_transformer_output, mask)
+    # Transformer
+    seq_hidden = model.pos_encoder(seq_hidden)
+    src_key_padding_mask = (mask == 0)
+    hidden_transformer = model.transformer_encoder(seq_hidden, src_key_padding_mask=src_key_padding_mask)
+    
+    return targets, model.compute_scores(hidden_transformer, mask)
 # ---------------------------------------------------------------------
 
 
+from torch.cuda.amp import autocast, GradScaler
+
 def train_test(model, train_data, test_data):
-    
-    print('start training: ', datetime.datetime.now())
+    scaler = GradScaler()
     model.train()
     total_loss = 0.0
     slices = train_data.generate_batch(model.batch_size)
     for i, j in zip(slices, np.arange(len(slices))):
         model.optimizer.zero_grad()
-        targets, scores = forward(model, i, train_data) # از تابع forward اصلاح شده استفاده می شود
-        targets = trans_to_cuda(torch.Tensor(targets).long())
-        loss = model.loss_function(scores, targets - 1)
-        loss.backward()
-        model.optimizer.step()
-        model.scheduler.step()
+        with autocast():  # فعال‌سازی Mixed Precision
+            targets, scores = forward(model, i, train_data)
+            targets = trans_to_cuda(torch.Tensor(targets).long())
+            loss = model.loss_function(scores, targets - 1)
+        scaler.scale(loss).backward()  # جایگزین loss.backward()
+        scaler.step(model.optimizer)
+        scaler.update()
         total_loss += loss.item()
         if j % int(len(slices) / 5 + 1) == 0:
             print('[%d/%d] Loss: %.4f' % (j, len(slices), loss.item()))
