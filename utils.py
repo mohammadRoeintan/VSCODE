@@ -2,31 +2,37 @@ import networkx as nx
 import numpy as np
 
 
+from scipy.sparse import lil_matrix, csr_matrix
+
 def build_graph(train_data):
-    graph = nx.DiGraph()
+    max_node = max(max(seq) for seq in train_data) + 1
+    adj_in = lil_matrix((max_node, max_node))
+    adj_out = lil_matrix((max_node, max_node))
+    
     for seq in train_data:
         for i in range(len(seq) - 1):
-            if graph.get_edge_data(seq[i], seq[i + 1]) is None:
-                weight = 1
-            else:
-                weight = graph.get_edge_data(seq[i], seq[i + 1])['weight'] + 1
-            graph.add_edge(seq[i], seq[i + 1], weight=weight)
-    for node in graph.nodes:
-        sum = 0
-        for j, i in graph.in_edges(node):
-            sum += graph.get_edge_data(j, i)['weight']
-        if sum != 0:
-            for j, i in graph.in_edges(i):
-                graph.add_edge(j, i, weight=graph.get_edge_data(j, i)['weight'] / sum)
-    return graph
+            u, v = seq[i], seq[i + 1]
+            adj_out[u, v] += 1
+            adj_in[v, u] += 1
+    
+    # نرمالایز کردن ماتریس‌ها
+    adj_in = adj_in.tocsr()
+    adj_out = adj_out.tocsr()
+    for i in range(max_node):
+        if adj_in[i].sum() > 0:
+            adj_in[i] = adj_in[i] / adj_in[i].sum()
+        if adj_out[i].sum() > 0:
+            adj_out[i] = adj_out[i] / adj_out[i].sum()
+    
+    return adj_in, adj_out
 
 
 def data_masks(all_usr_pois, item_tail):
-    us_lens = [len(upois) for upois in all_usr_pois]
-    len_max = max(us_lens)
-    us_pois = [upois + item_tail * (len_max - le) for upois, le in zip(all_usr_pois, us_lens)]
+    us_lens = torch.tensor([len(upois) for upois in all_usr_pois])
+    len_max = us_lens.max().item()
+    us_pois = [upois + [item_tail] * (len_max - len(upois)) for upois in all_usr_pois]
     us_msks = [[1] * le + [0] * (len_max - le) for le in us_lens]
-    return us_pois, us_msks, len_max
+    return torch.tensor(us_pois), torch.tensor(us_msks), len_max
 
 
 def split_validation(train_set, valid_portion):
