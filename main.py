@@ -37,25 +37,14 @@ def main():
     # اگر داده به صورت تاپل بارگذاری شده باشد
     # استخراج سشن‌ها و تارگت‌ها
     if isinstance(train_data, tuple):
-        print("Data is a tuple, extracting sessions and targets...")
         sessions, targets = train_data
-        print(f"Number of sessions: {len(sessions)}")
-        print(f"Number of targets: {len(targets)}")
-        
-        # بررسی و اصلاح ساختار سشن‌ها
-        cleaned_sessions = []
-        for session in sessions:
-            cleaned_session = []
-            for item in session:
-                if isinstance(item, list):
-                    cleaned_session.append(item[0])
-                else:
-                    cleaned_session.append(item)
-            cleaned_sessions.append(cleaned_session)
-        sessions = cleaned_sessions
+        # تبدیل تمام آیتم‌های لیست به اعداد صحیح
+        sessions = [
+            [int(item[0]) if isinstance(item, list) else int(item) 
+            for item in session
+        ] for session in sessions
     else:
         sessions = train_data
-        targets = [...]  # اگر تارگت‌ها جداگانه هستند
     
     # ساخت گراف
     adj_in, adj_out = build_graph(sessions)
