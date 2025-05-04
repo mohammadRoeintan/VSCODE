@@ -1,6 +1,7 @@
 import optuna
 import subprocess
 import sys
+import re
 
 def objective(trial):
     hidden_size = trial.suggest_categorical('hiddenSize', [50, 100, 150, 200])
@@ -27,18 +28,26 @@ def objective(trial):
         last_line = [line for line in output.split('\n') if 'Best Result' in line]
         if last_line:
             recall_lines = [line for line in result.stdout.splitlines() if 'Recall@20:' in line]
+
             if not recall_lines:
                 print("No Recall@20 line found in output!")
                 print("Full output:\n", result.stdout)
                 raise RuntimeError("Failed to extract Recall@20 from output.")
+            
+            # فرض می‌گیریم اولین خط مناسب را استفاده می‌کنیم
             recall_line = recall_lines[0]
-
-            recall_value_str = recall_line.split('Recall@20:')[1].split('\t')[0].strip()
-            if not recall_value_str:
-                print("Recall@20 value string is empty!")
-                print("Recall line:\n", recall_line)
-                raise RuntimeError("Recall@20 value is empty.")
+            
+            # استفاده از regex برای استخراج دقیق عدد بعد از Recall@20:
+            match = re.search(r'Recall@20:\s*([\d\.]+)', recall_line)
+            if not match:
+                print("Could not extract Recall@20 value from line:", recall_line)
+                raise RuntimeError("Recall@20 value is missing or malformed.")
+            
+            recall_value_str = match.group(1)
             recall_value = float(recall_value_str)
+            
+            print(f"Extracted Recall@20 value: {recall_value}")
+
 
 
             return recall_value
