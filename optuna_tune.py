@@ -26,8 +26,15 @@ def objective(trial):
         # آخرین Recall@20 را از لاگ استخراج کن
         last_line = [line for line in output.split('\n') if 'Best Result' in line]
         if last_line:
-            recall_line = last_line[-1]
+            recall_lines = [line for line in result.stdout.splitlines() if 'Recall@20:' in line]
+            if not recall_lines:
+                print("No Recall@20 line found in output!")
+                print("Full output:\n", result.stdout)
+                raise RuntimeError("Failed to extract Recall@20 from output.")
+
+            recall_line = recall_lines[0]
             recall_value = float(recall_line.split('Recall@20:')[1].split('\t')[0])
+
             return recall_value
         else:
             return 0.0  # اگر پیدا نشد

@@ -26,7 +26,7 @@ opt = parser.parse_args()
 print(opt)
 
 def main():
-    train_data = pickle.load(open('/kaggle/working/TAGNN/datasets/' + opt.dataset + '/train.txt', 'rb'))
+    train_data = pickle.load(open('/kaggle/working/VSCODE/datasets/' + opt.dataset + '/train.txt', 'rb'))
 
     # محدود کردن به ۵٪ داده
     if isinstance(train_data, tuple):
@@ -44,7 +44,7 @@ def main():
         train_data, valid_data = split_validation(train_data, opt.valid_portion)
         test_data = valid_data
     else:
-        test_data = pickle.load(open('/kaggle/working/TAGNN/datasets/' + opt.dataset + '/test.txt', 'rb'))
+        test_data = pickle.load(open('/kaggle/working/VSCODE/datasets/' + opt.dataset + '/test.txt', 'rb'))
 
         # محدود کردن تست هم به ۵٪
         if isinstance(test_data, tuple):
