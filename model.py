@@ -292,7 +292,7 @@ class SessionGraph(Module):
 
 
         # Apply sequence mask again to qt before final matmul
-        target = beta @ (qt * mask_expanded.transpose(1,2)) # (b, n-1, d)
+        target = beta @ (qt * mask_expanded ) # (b, n-1, d)
 
         # --- ترکیب نهایی و محاسبه امتیاز ---
         final_representation = a.unsqueeze(1) + target # (b, n-1, d) Use broadcasting
