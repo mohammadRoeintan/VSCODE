@@ -11,7 +11,7 @@ def objective(trial):
     # دستور اجرای فایل main.py با پارامترهای پیشنهادی
     cmd = [
         sys.executable, 'main.py',
-        '--dataset', 'sample',
+        '--dataset', 'yoochoose1_64',
         '--hiddenSize', str(hidden_size),
         '--lr', str(lr),
         '--l2', str(l2),
