@@ -23,14 +23,14 @@ print(opt)
 
 
 def main():
-    train_data = pickle.load(open('/kaggle/working/TAGNN/datasets/' + opt.dataset + '/train.txt', 'rb'))
+    train_data = pickle.load(open('/root/.cache/kagglehub/datasets/mohammadroeintan/yoochoose1-64/versions/1/' + opt.dataset + '/train.txt', 'rb'))
      
     
     if opt.validation:
         train_data, valid_data = split_validation(train_data, opt.valid_portion)
         test_data = valid_data
     else:
-        test_data = pickle.load(open('/kaggle/working/TAGNN/datasets/' + opt.dataset + '/test.txt', 'rb'))
+        test_data = pickle.load(open('/root/.cache/kagglehub/datasets/mohammadroeintan/yoochoose1-64/versions/1/' + opt.dataset + '/test.txt', 'rb'))
     
     # استخراج سشن‌ها و تارگت‌ها
     if isinstance(train_data, tuple):
