@@ -36,7 +36,7 @@ print(opt)
 
 def main():
     # مسیر دیتاست‌ها را مطابق با ساختار خودتان تنظیم کنید
-    dataset_path = '/kaggle/working/VSCODE/datasets/' # مسیر پایه دیتاست
+    dataset_path = '/root/.cache/kagglehub/datasets/mohammadroeintan/yoochoose1-64/versions/1/' # مسیر پایه دیتاست
 
     train_data_file = dataset_path + opt.dataset + '/train.txt'
     test_data_file = dataset_path + opt.dataset + '/test.txt'
