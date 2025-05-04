@@ -31,9 +31,15 @@ def objective(trial):
                 print("No Recall@20 line found in output!")
                 print("Full output:\n", result.stdout)
                 raise RuntimeError("Failed to extract Recall@20 from output.")
-
             recall_line = recall_lines[0]
-            recall_value = float(recall_line.split('Recall@20:')[1].split('\t')[0])
+
+            recall_value_str = recall_line.split('Recall@20:')[1].split('\t')[0].strip()
+            if not recall_value_str:
+                print("Recall@20 value string is empty!")
+                print("Recall line:\n", recall_line)
+                raise RuntimeError("Recall@20 value is empty.")
+            recall_value = float(recall_value_str)
+
 
             return recall_value
         else:
