@@ -1,0 +1,7 @@
+# requirements.txt
+torch
+numpy
+networkx
+scipy
+tqdm
+pickle-mixin
