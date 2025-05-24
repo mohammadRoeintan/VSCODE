@@ -1,40 +1,52 @@
-import networkx as nx
 import numpy as np
 import torch
-# import scipy sparse if needed
-# from scipy.sparse import lil_matrix, csr_matrix # Not used in current build_graph
+# import networkx as nx # اگر برای ساخت گراف کلی استفاده می‌شد، لازم بود
 
-# تابع ساخت گراف (بدون تغییر)
-def build_graph(sessions):
-    """Builds adjacency matrices from session data."""
-    if not sessions:
-        raise ValueError("Cannot build graph from empty session list.")
-
-    max_node = 0
-    for seq in sessions:
-        if seq:
-             try:
-                  max_node = max(max_node, max(item for item in seq if isinstance(item, int) and item > 0))
-             except ValueError:
-                  pass
-
-    if max_node == 0:
-        print("Warning: No valid items found in sessions. Returning minimal graph.")
+# تابع build_graph در کد شما به نظر می‌رسد که برای ساخت یک گراف کلی از تمام sessionها در ابتدای کار است.
+# اما در پیاده‌سازی فعلی، گراف‌ها به صورت پویا برای هر بچ در Data.get_slice ساخته می‌شوند.
+# بنابراین، این تابع build_graph اگر در main فراخوانی نشود، عملاً استفاده نمی‌شود.
+# آن را برای کامل بودن اینجا می‌آوریم، اما در main.py فعلی فراخوانی نمی‌شود.
+def build_graph_global(all_sessions_items):
+    """
+    Builds global adjacency matrices from all unique session items if needed.
+    Note: Current model builds graph per batch in Data.get_slice.
+    """
+    if not all_sessions_items:
+        print("Warning: Trying to build global graph from empty session list.")
         return np.zeros((1, 1), dtype=np.float32), np.zeros((1, 1), dtype=np.float32)
 
-    graph_size = max_node + 1
-    adj_in_counts = {i: {} for i in range(graph_size)}
-    adj_out_counts = {i: {} for i in range(graph_size)}
+    unique_nodes = set()
+    for session in all_sessions_items:
+        for item_wrapper in session:
+            item = item_wrapper[0] if isinstance(item_wrapper, list) and item_wrapper else item_wrapper
+            if isinstance(item, int) and item > 0: # آیتم 0 معمولا پدینگ است
+                unique_nodes.add(item)
+    
+    if not unique_nodes:
+        print("Warning: No valid nodes found to build global graph.")
+        return np.zeros((1, 1), dtype=np.float32), np.zeros((1, 1), dtype=np.float32)
 
-    for seq in sessions:
-        for i in range(len(seq) - 1):
-             u, v = seq[i], seq[i+1]
-             if isinstance(u, int) and isinstance(v, int) and u > 0 and v > 0 and u < graph_size and v < graph_size:
-                 adj_out_counts[u][v] = adj_out_counts[u].get(v, 0) + 1
-                 adj_in_counts[v][u] = adj_in_counts[v].get(u, 0) + 1
+    n_node = max(unique_nodes) + 1 # +1 برای اندیس‌گذاری از 0
 
-    adj_in = np.zeros((graph_size, graph_size), dtype=np.float32)
-    adj_out = np.zeros((graph_size, graph_size), dtype=np.float32)
+    adj_in_counts = {i: {} for i in range(n_node)}
+    adj_out_counts = {i: {} for i in range(n_node)}
+
+    for session_items in all_sessions_items:
+        # تبدیل آیتم‌ها به int و فیلتر کردن None یا مقادیر غیر عددی
+        cleaned_session = []
+        for item_wrapper in session_items:
+            item_val = item_wrapper[0] if isinstance(item_wrapper, list) and item_wrapper else item_wrapper
+            if isinstance(item_val, int) and item_val > 0 and item_val < n_node:
+                cleaned_session.append(item_val)
+        
+        for i in range(len(cleaned_session) - 1):
+            u, v = cleaned_session[i], cleaned_session[i+1]
+            # u, v باید از قبل int و در محدوده باشند
+            adj_out_counts[u][v] = adj_out_counts[u].get(v, 0) + 1
+            adj_in_counts[v][u] = adj_in_counts[v].get(u, 0) + 1
+
+    adj_in = np.zeros((n_node, n_node), dtype=np.float32)
+    adj_out = np.zeros((n_node, n_node), dtype=np.float32)
 
     for u, neighbors in adj_out_counts.items():
         out_degree = sum(neighbors.values())
@@ -47,30 +59,50 @@ def build_graph(sessions):
         if in_degree > 0:
             for u, count in neighbors.items():
                 adj_in[v, u] = count / in_degree
-
+                
     return adj_in, adj_out
 
 
-# تابع data_masks (بدون تغییر نسبت به نسخه قبلی)
 def data_masks(all_usr_pois, item_tail=0):
-    if not all_usr_pois:
-        return torch.empty((0, 0), dtype=torch.long), torch.empty((0, 0), dtype=torch.long), 0
+    """
+    Pads sequences and creates masks.
+    all_usr_pois: list of sessions, where each session is a list of item IDs.
+    item_tail: value used for padding (usually 0).
+    """
+    if not all_usr_pois: # اگر لیست sessionها خالی باشد
+        # برگرداندن تنسورهای خالی با ابعاد مناسب برای جلوگیری از خطا در ادامه
+        # (0,0) برای توالی‌ها و ماسک‌ها، 0 برای max_len
+        return torch.empty((0, 0), dtype=torch.long), torch.empty((0, 0), dtype=torch.float32), 0
 
-    us_lens = [len(upois) for upois in all_usr_pois]
-    if not us_lens: max_len = 0
-    else: max_len = max(us_lens) if us_lens else 0
+    us_lens = [len(upois) for upois in all_usr_pois if upois] # طول sessionهای غیرخالی
+    if not us_lens: # اگر همه sessionها خالی باشند
+        max_len = 0
+    else:
+        max_len = max(us_lens)
 
-    if max_len == 0:
-         num_sessions = len(all_usr_pois)
-         return torch.zeros((num_sessions, 0), dtype=torch.long), torch.zeros((num_sessions, 0), dtype=torch.float32), 0
+    if max_len == 0: # اگر همه sessionها خالی هستند یا تنها session خالی وجود دارد
+        num_sessions = len(all_usr_pois)
+        # برگرداندن تنسورهای پد شده با طول صفر برای هر session
+        return torch.zeros((num_sessions, 0), dtype=torch.long), torch.zeros((num_sessions, 0), dtype=torch.float32), 0
 
     us_pois_padded = []
     us_msks = []
-    for upois in all_usr_pois:
-        cleaned_upois = [int(item) for item in upois if isinstance(item, (int, float)) and item is not None]
+    for upois_original in all_usr_pois:
+        # پاکسازی session: تبدیل همه آیتم‌ها به int و حذف None یا مقادیر نامعتبر
+        cleaned_upois = []
+        if upois_original: # اگر session اصلی خالی نباشد
+            for item_wrapper in upois_original:
+                # آیتم‌ها ممکن است int یا list تک عنصری باشند
+                item = item_wrapper[0] if isinstance(item_wrapper, list) and item_wrapper else item_wrapper
+                if isinstance(item, (int, float)) and not np.isnan(item): # تبدیل float به int و بررسی NaN
+                    cleaned_upois.append(int(item))
+                # elif isinstance(item, str) and item.isdigit(): # اگر آیتم‌ها به صورت رشته عددی باشند
+                #     cleaned_upois.append(int(item))
+        
         padding_len = max_len - len(cleaned_upois)
         padded_seq = cleaned_upois + [item_tail] * padding_len
         us_pois_padded.append(padded_seq)
+        
         mask = [1] * len(cleaned_upois) + [0] * padding_len
         us_msks.append(mask)
 
@@ -80,167 +112,221 @@ def data_masks(all_usr_pois, item_tail=0):
     except Exception as e:
         print("Error in tensor conversion (data_masks):")
         print(f"Max length: {max_len}")
-        print(f"Number of sequences: {len(us_pois_padded)}")
-        for i, seq in enumerate(us_pois_padded):
-             if len(seq) != max_len:
-                  print(f"Inconsistent length at index {i}: expected {max_len}, got {len(seq)}")
-        raise e
+        print(f"Number of sequences to pad: {len(all_usr_pois)}")
+        # for i, seq_orig in enumerate(all_usr_pois):
+        #     seq_pad = us_pois_padded[i]
+        #     # print(f"Original seq {i} (len {len(seq_orig if seq_orig else [])}): {seq_orig}")
+        #     # print(f"Padded seq {i} (len {len(seq_pad)}): {seq_pad}")
+        #     if len(seq_pad) != max_len:
+        #          print(f"Inconsistent padded length at index {i}: expected {max_len}, got {len(seq_pad)}")
+        raise e # ارسال مجدد خطا برای بررسی بیشتر
+        
     return us_pois_tensor, us_msks_tensor, max_len
 
 
-# تابع split_validation (بدون تغییر)
-def split_validation(train_set, valid_portion):
-    if not isinstance(train_set, tuple) or len(train_set) != 2:
-        raise ValueError("train_set must be a tuple of (sessions, targets)")
-    train_set_x, train_set_y = train_set
+def split_validation(train_set_original, valid_portion):
+    # train_set_original باید یک تاپل (sessions, targets) باشد
+    if not (isinstance(train_set_original, tuple) and len(train_set_original) == 2):
+        raise ValueError("train_set for split_validation must be a tuple of (sessions, targets)")
+        
+    train_set_x, train_set_y = train_set_original
+    
+    if not train_set_x: # اگر لیست sessionها خالی باشد
+        print("Warning: train_set_x is empty in split_validation. Returning empty sets.")
+        return ([], []), ([], [])
+
     n_samples = len(train_set_x)
-    if n_samples == 0: return ([], []), ([], [])
+    if n_samples == 0: 
+        return ([], []), ([], [])
+
     sidx = np.arange(n_samples, dtype='int32')
     np.random.shuffle(sidx)
+    
     n_train = int(np.round(n_samples * (1. - valid_portion)))
-    n_train = max(0, min(n_samples, n_train))
+    # اطمینان از اینکه n_train در محدوده معتبر است
+    n_train = max(0, min(n_samples, n_train)) 
+
     valid_set_x = [train_set_x[s] for s in sidx[n_train:]]
     valid_set_y = [train_set_y[s] for s in sidx[n_train:]]
-    train_set_x = [train_set_x[s] for s in sidx[:n_train]]
-    train_set_y = [train_set_y[s] for s in sidx[:n_train]]
-    return (train_set_x, train_set_y), (valid_set_x, valid_set_y)
+    train_set_x_split = [train_set_x[s] for s in sidx[:n_train]]
+    train_set_y_split = [train_set_y[s] for s in sidx[:n_train]]
+    
+    return (train_set_x_split, train_set_y_split), (valid_set_x, valid_set_y)
 
 
-# کلاس Data (بدون تغییر در __init__ و generate_batch نسبت به نسخه قبلی)
 class Data():
-    def __init__(self, data, shuffle=False, graph=None):
-         if not isinstance(data, tuple) or len(data) != 2:
-              raise ValueError("Input data must be a tuple of (sessions, targets)")
-         inputs_raw, targets_raw = data
+    def __init__(self, data_tuple, shuffle=False, graph=None): # پارامتر graph استفاده نمی‌شود
+         # data_tuple باید (list_of_sessions, list_of_targets) باشد
+         if not isinstance(data_tuple, tuple) or len(data_tuple) != 2:
+              raise ValueError("Input data for Data class must be a tuple of (sessions, targets)")
+         
+         inputs_raw, targets_raw = data_tuple
+         
          if len(inputs_raw) != len(targets_raw):
               raise ValueError(f"Number of sessions ({len(inputs_raw)}) does not match number of targets ({len(targets_raw)})")
+         
+         # پاکسازی اولیه targets_raw برای اطمینان از اینکه همه int هستند (اگر لازم باشد)
+         # این کار بهتر است قبل از ارسال به Data انجام شود، اما یک بررسی اضافی اینجا می‌تواند مفید باشد.
+         cleaned_targets_raw = []
+         for t_wrapper in targets_raw:
+             t = t_wrapper[0] if isinstance(t_wrapper, list) and t_wrapper else t_wrapper
+             if isinstance(t, (int, float)) and not np.isnan(t):
+                 cleaned_targets_raw.append(int(t))
+             # elif isinstance(t, str) and t.isdigit():
+             #     cleaned_targets_raw.append(int(t))
+             else:
+                 # اگر تارگت نامعتبر است، یک مقدار پیش‌فرض (مثلا 0) یا خطا
+                 # print(f"Warning: Invalid target '{t_wrapper}' found. Replacing with 0 or handle error.")
+                 cleaned_targets_raw.append(0) # یا raise ValueError
 
-         inputs_tensor, mask_tensor, len_max = data_masks(inputs_raw, item_tail=0)
-         self.inputs = inputs_tensor.numpy()
-         self.mask = mask_tensor.numpy()
-         self.len_max = len_max
-         self.targets = np.asarray(targets_raw)
-         self.length = len(inputs_raw)
+         # inputs_raw باید لیستی از لیست‌ها باشد. data_masks این را مدیریت می‌کند.
+         inputs_tensor, mask_tensor, len_max_seq = data_masks(inputs_raw, item_tail=0) # item_tail=0 برای پدینگ
+         
+         self.inputs = inputs_tensor.numpy() # (num_samples, max_len)
+         self.mask = mask_tensor.numpy()     # (num_samples, max_len)
+         self.len_max = len_max_seq          # حداکثر طول توالی در این داده
+         self.targets = np.asarray(cleaned_targets_raw) # (num_samples,)
+         self.length = len(inputs_raw)       # تعداد کل نمونه‌ها (sessionها)
          self.shuffle = shuffle
 
     def generate_batch(self, batch_size):
-        if self.length == 0: return []
+        if self.length == 0: return [] # اگر داده‌ای وجود نداشته باشد
+        
         indices = np.arange(self.length)
-        if self.shuffle: np.random.shuffle(indices)
+        if self.shuffle:
+            np.random.shuffle(indices)
+            
         n_batch = self.length // batch_size
-        if self.length % batch_size != 0: n_batch += 1
+        if self.length % batch_size != 0:
+            n_batch += 1
+            
         slices = []
         for i in range(n_batch):
             start = i * batch_size
             end = min((i + 1) * batch_size, self.length)
-            slices.append(indices[start:end])
-        slices = [s for s in slices if len(s) > 0]
+            if start < end: # فقط بچ‌های غیرخالی را اضافه کن
+                slices.append(indices[start:end])
         return slices
 
 
-    # ***** تابع get_slice (اصلاح شده اساسی) *****
-    def get_slice(self, i):
-        """Gets a slice of data based on indices i and prepares inputs for GNN."""
-        # i is an array of indices from generate_batch
-        inputs_original_seqs = self.inputs[i] # Original sequences with padding (Batch, SeqLen)
-        mask_slice = self.mask[i]             # Mask for original sequences (Batch, SeqLen)
-        targets_slice = self.targets[i]       # Targets for sequences (Batch,)
-        batch_size = len(inputs_original_seqs)
+    def get_slice(self, i_indices): # i_indices آرایه‌ای از اندیس‌ها برای بچ است
+        """
+        Gets a slice of data based on indices i_indices and prepares inputs for GNN.
+        """
+        # inputs_original_seqs: (batch_size, self.len_max) - توالی‌های اصلی با پدینگ
+        inputs_original_seqs_batch = self.inputs[i_indices]
+        # mask_slice: (batch_size, self.len_max) - ماسک برای توالی‌های اصلی
+        mask_slice_batch = self.mask[i_indices]
+        # targets_slice: (batch_size,) - تارگت‌ها برای توالی‌ها
+        targets_slice_batch = self.targets[i_indices]
+        
+        current_batch_size = len(inputs_original_seqs_batch)
 
-        # 1. Find unique nodes *per session* and the overall max number of unique nodes in batch
+        # 1. پیدا کردن نودهای یکتا *در هر session* و حداکثر تعداد نودهای یکتا در بچ
         session_unique_nodes_list = []
-        max_n_node_in_batch = 0
-        for k in range(batch_size):
-            # Get actual items in the sequence using the mask
-            seq_len = int(mask_slice[k].sum())
-            original_seq = inputs_original_seqs[k][:seq_len]
-            # Find unique non-padding nodes in this sequence
-            unique_nodes = np.unique(original_seq[original_seq > 0]) # Exclude padding 0
-            session_unique_nodes_list.append(unique_nodes)
-            max_n_node_in_batch = max(max_n_node_in_batch, len(unique_nodes))
+        max_n_node_in_batch = 0 # حداکثر تعداد نودهای یکتا در یک session از این بچ
+        
+        for k in range(current_batch_size):
+            # استخراج آیتم‌های واقعی در توالی با استفاده از ماسک
+            actual_seq_len = int(mask_slice_batch[k].sum())
+            original_seq_k = inputs_original_seqs_batch[k][:actual_seq_len]
+            
+            # پیدا کردن نودهای یکتای غیر پدینگ (بزرگتر از 0) در این توالی
+            unique_nodes_in_seq_k = np.unique(original_seq_k[original_seq_k > 0]) 
+            session_unique_nodes_list.append(unique_nodes_in_seq_k)
+            max_n_node_in_batch = max(max_n_node_in_batch, len(unique_nodes_in_seq_k))
 
-        # Handle case where batch might only contain empty sequences or padding
+        # اگر بچ فقط شامل sessionهای خالی یا پدینگ باشد
         if max_n_node_in_batch == 0:
-             max_n_node_in_batch = 1 # Need at least one node dimension for tensors
+             max_n_node_in_batch = 1 # حداقل یک بعد برای تنسورها لازم است
 
-        # 2. Create the 2D 'items' tensor and the node mapping for each session
-        # 'items' will hold the original node IDs for embedding lookup
-        items_batch = np.zeros((batch_size, max_n_node_in_batch), dtype=np.int64)
-        # 'alias_inputs' will hold sequences mapped to indices within each row of 'items_batch'
-        alias_inputs_batch = np.zeros_like(inputs_original_seqs, dtype=np.int64)
-        # List to hold adjacency matrices A for each session
-        A_batch = []
+        # 2. ساخت تنسور 'items_for_gnn' و نگاشت نود برای هر session
+        # 'items_for_gnn': (batch_size, max_n_node_in_batch) - شناسه‌های اصلی نودها برای lookup امبدینگ در GNN
+        items_for_gnn_batch = np.zeros((current_batch_size, max_n_node_in_batch), dtype=np.int64)
+        
+        # 'alias_inputs_for_transformer': (batch_size, self.len_max)
+        # توالی‌هایی که به اندیس‌های داخل هر ردیف از items_for_gnn_batch نگاشت شده‌اند.
+        # این ورودی برای استخراج نمایش توالی از خروجی GNN و ارسال به ترانسفورمر استفاده می‌شود.
+        alias_inputs_for_transformer_batch = np.zeros_like(inputs_original_seqs_batch, dtype=np.int64)
+        
+        # لیستی برای نگهداری ماتریس‌های مجاورت A برای هر session در بچ
+        A_batch_list = []
 
-        for k in range(batch_size):
-            unique_nodes = session_unique_nodes_list[k]
-            num_unique_in_session = len(unique_nodes)
+        for k in range(current_batch_size):
+            unique_nodes_k = session_unique_nodes_list[k] # نودهای یکتای این session
+            num_unique_in_session_k = len(unique_nodes_k)
 
-            # Create the k-th row of 'items' (original IDs, padded)
-            if num_unique_in_session > 0:
-                items_batch[k, :num_unique_in_session] = unique_nodes
-            # items_batch[k, num_unique_in_session:] = 0 # Already initialized to 0
+            # ساخت ردیف k-ام از 'items_for_gnn' (شناسه‌های اصلی، پد شده با 0)
+            if num_unique_in_session_k > 0:
+                items_for_gnn_batch[k, :num_unique_in_session_k] = unique_nodes_k
+            # بقیه با 0 مقداردهی اولیه شده‌اند
 
-            # Create mapping from original node ID -> index within this session's unique nodes (0 to num_unique_in_session-1)
-            node_map_session = {node_id: idx for idx, node_id in enumerate(unique_nodes)}
+            # ساخت نگاشت از شناسه نود اصلی -> اندیس محلی در نودهای یکتای این session (از 0 تا num_unique_in_session_k-1)
+            node_map_session_k = {node_id: local_idx for local_idx, node_id in enumerate(unique_nodes_k)}
 
-            # Create the k-th row of 'alias_inputs' using the session map
-            original_seq_padded = inputs_original_seqs[k]
-            for j, item_id in enumerate(original_seq_padded):
-                alias_inputs_batch[k, j] = node_map_session.get(item_id, 0) # Map to local index, default to 0 (padding) if item_id not in unique_nodes (e.g., was padding)
-
-            # --- Build Adjacency Matrix (A) for session k ---
-            # Use local indices (0 to num_unique_in_session-1)
-            adj_session = np.zeros((num_unique_in_session, num_unique_in_session), dtype=np.float32)
-            seq_len = int(mask_slice[k].sum())
-            current_seq_local_indices = alias_inputs_batch[k, :seq_len]
-
-            for j in range(seq_len - 1):
-                u_local_idx = current_seq_local_indices[j]
-                v_local_idx = current_seq_local_indices[j+1]
-                # Ensure indices are valid (should be, as they come from mapping unique nodes)
-                if u_local_idx < num_unique_in_session and v_local_idx < num_unique_in_session:
-                     # We only care about transitions between non-padding nodes mapped locally
-                     # The map defaults padding to 0, but check original IDs were > 0?
-                     # Let's assume the alias map handles this correctly.
-                     # If u_local_idx and v_local_idx correspond to original padding (0), they won't be in node_map_session keys.
-                     # We should only add edge if both u and v were non-padding originally.
-                     original_u = inputs_original_seqs[k, j]
-                     original_v = inputs_original_seqs[k, j+1]
-                     if original_u > 0 and original_v > 0:
-                          adj_session[u_local_idx, v_local_idx] = 1
+            # ساخت ردیف k-ام از 'alias_inputs_for_transformer' با استفاده از نگاشت session
+            original_seq_padded_k = inputs_original_seqs_batch[k] # توالی اصلی پد شده این session
+            for j, item_id_original in enumerate(original_seq_padded_k):
+                # اگر item_id_original در نودهای یکتا نباشد (مثلا پدینگ 0 بود)، به 0 نگاشت می‌شود.
+                # فرض: پدینگ (0) در node_map_session_k نخواهد بود چون unique_nodes_k فقط شامل آیتم‌های >0 است.
+                # اگر آیتم اصلی 0 (پدینگ) باشد، get نتیجه None می‌دهد و با پیش‌فرض 0 جایگزین می‌شود.
+                # اگر آیتمی در توالی اصلی بود که در unique_nodes_k نیست (نباید اتفاق بیفتد جز برای پدینگ)، آن هم 0 می‌شود.
+                alias_inputs_for_transformer_batch[k, j] = node_map_session_k.get(item_id_original, 0)
 
 
-            # Normalize A (In/Out degrees) for the session
-            sum_in = np.sum(adj_session, 0)
-            sum_in[sum_in == 0] = 1
-            adj_in_norm = adj_session / sum_in # Broadcasting
+            # --- ساخت ماتریس مجاورت (A) برای session k ---
+            # از اندیس‌های محلی (0 تا num_unique_in_session_k-1) استفاده می‌شود
+            adj_session_k_dense = np.zeros((num_unique_in_session_k, num_unique_in_session_k), dtype=np.float32)
+            
+            actual_seq_len_k = int(mask_slice_batch[k].sum())
+            # استفاده از alias_inputs_for_transformer_batch که اندیس‌های محلی را دارد
+            current_seq_local_indices_k = alias_inputs_for_transformer_batch[k, :actual_seq_len_k]
 
-            sum_out = np.sum(adj_session, 1)
+            for j in range(actual_seq_len_k - 1):
+                u_local_idx = current_seq_local_indices_k[j]
+                v_local_idx = current_seq_local_indices_k[j+1]
+                
+                # اطمینان از اینکه اندیس‌های محلی معتبر هستند و به آیتم‌های پدینگ اصلی اشاره نمی‌کنند.
+                # آیتم‌های پدینگ اصلی (0) به local_idx=0 نگاشت می‌شوند (اگر 0 در node_map نباشد).
+                # ما فقط یال بین نودهای غیر پدینگ اصلی می‌خواهیم.
+                original_u = inputs_original_seqs_batch[k, j]
+                original_v = inputs_original_seqs_batch[k, j+1]
+
+                if original_u > 0 and original_v > 0: # فقط اگر هر دو نود اصلی غیر پدینگ بودند
+                    # u_local_idx و v_local_idx باید اندیس‌های معتبر در adj_session_k_dense باشند
+                    if u_local_idx < num_unique_in_session_k and v_local_idx < num_unique_in_session_k:
+                         adj_session_k_dense[u_local_idx, v_local_idx] = 1
+            
+            # نرمال‌سازی ماتریس A برای session k (درجه ورودی/خروجی)
+            sum_in = np.sum(adj_session_k_dense, axis=0) # مجموع ستون‌ها (درجه ورودی)
+            sum_in[sum_in == 0] = 1 # جلوگیری از تقسیم بر صفر
+            adj_in_norm_k = adj_session_k_dense / sum_in # Broadcasting
+
+            sum_out = np.sum(adj_session_k_dense, axis=1) # مجموع ردیف‌ها (درجه خروجی)
             sum_out[sum_out == 0] = 1
-            # Need to transpose correctly for division by sum_out column vector
-            adj_out_norm = (adj_session.T / sum_out).T
+            adj_out_norm_k = (adj_session_k_dense.T / sum_out).T # نرمال‌سازی بر اساس درجه خروجی
 
-            # Pad adjacency matrices to batch max size (max_n_node_in_batch)
-            padded_A_in = np.zeros((max_n_node_in_batch, max_n_node_in_batch), dtype=np.float32)
-            padded_A_out = np.zeros((max_n_node_in_batch, max_n_node_in_batch), dtype=np.float32)
+            # پد کردن ماتریس‌های مجاورت به اندازه حداکثر نود یکتا در بچ (max_n_node_in_batch)
+            padded_A_in_k = np.zeros((max_n_node_in_batch, max_n_node_in_batch), dtype=np.float32)
+            padded_A_out_k = np.zeros((max_n_node_in_batch, max_n_node_in_batch), dtype=np.float32)
 
-            if num_unique_in_session > 0:
-                padded_A_in[:num_unique_in_session, :num_unique_in_session] = adj_in_norm
-                padded_A_out[:num_unique_in_session, :num_unique_in_session] = adj_out_norm
+            if num_unique_in_session_k > 0:
+                padded_A_in_k[:num_unique_in_session_k, :num_unique_in_session_k] = adj_in_norm_k
+                padded_A_out_k[:num_unique_in_session_k, :num_unique_in_session_k] = adj_out_norm_k
+            
+            # الحاق ماتریس‌های نرمال شده برای این session
+            # A_combined_k شکل: (max_n_node_in_batch, 2 * max_n_node_in_batch)
+            A_combined_k = np.concatenate([padded_A_in_k, padded_A_out_k], axis=1)
+            A_batch_list.append(A_combined_k)
 
-            # Concatenate normalized matrices for this session
-            A_combined = np.concatenate([padded_A_in, padded_A_out], axis=1) # Shape: (max_n_node, 2 * max_n_node)
-            A_batch.append(A_combined)
+        # تبدیل لیست ماتریس‌های A به یک تنسور سه‌بعدی برای بچ
+        A_batch_tensor = np.array(A_batch_list) 
+        # شکل نهایی: (batch_size, max_n_node_in_batch, 2 * max_n_node_in_batch)
 
-
-        # Stack all session A matrices into a single 3D tensor for the batch
-        A_batch_tensor = np.array(A_batch) # Shape: (batch_size, max_n_node, 2 * max_n_node)
-
-        # Return the processed batch data
         return (
-            alias_inputs_batch,  # Sequences mapped to indices within items_batch rows (Batch, SeqLen)
-            A_batch_tensor,      # Batched adjacency matrices (Batch, max_n_node, 2*max_n_node)
-            items_batch,         # Original node IDs for embedding (Batch, max_n_node)
-            mask_slice,          # Original sequence mask (Batch, SeqLen)
-            targets_slice        # Original targets (Batch,)
+            alias_inputs_for_transformer_batch, # (B, SeqLenOriginalPadded) - اندیس‌های محلی برای واکشی از خروجی GNN
+            A_batch_tensor,                     # (B, max_n_node_in_batch, 2*max_n_node_in_batch) - ماتریس‌های مجاورت GNN
+            items_for_gnn_batch,                # (B, max_n_node_in_batch) - شناسه‌های اصلی آیتم‌ها برای ورودی GNN
+            mask_slice_batch,                   # (B, SeqLenOriginalPadded) - ماسک توالی اصلی
+            targets_slice_batch                 # (B,) - تارگت‌های اصلی
         )
