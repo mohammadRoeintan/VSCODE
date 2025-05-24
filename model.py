@@ -6,7 +6,7 @@ from torch import nn
 from torch.nn import Module, Parameter
 import torch.nn.functional as F
 # TransformerEncoder و TransformerEncoderLayer دیگر مستقیماً استفاده نمی‌شوند، مگر اینکه بخواهیم آن‌ها را حفظ کنیم
-# from torch.nn import TransformerEncoder, TransformerEncoderLayer 
+# from torch.nn import TransformerEncoder, TransformerEncoderLayer
 import copy # برای deepcopy در TargetAwareTransformerEncoder
 from torch.cuda.amp import autocast, GradScaler
 
@@ -36,9 +36,9 @@ class PositionalEncoding(Module):
             seq_len_dim_index = -1
             if x.dim() == 3:
                 # اولویت با batch_first=True اگر ابعاد اجازه دهند
-                if x.size(1) <= self.pe.size(0): 
+                if x.size(1) <= self.pe.size(0):
                     seq_len_dim_index = 1
-                elif x.size(0) <= self.pe.size(0): 
+                elif x.size(0) <= self.pe.size(0):
                     seq_len_dim_index = 0
 
             if seq_len_dim_index != -1:
@@ -48,7 +48,7 @@ class PositionalEncoding(Module):
                      pe_to_add = self.pe[:seq_len, :].squeeze(1).unsqueeze(0)
                 else: # batch_first = False
                      pe_to_add = self.pe[:seq_len, :] # Shape: (seq_len, 1, d_model)
-                
+
                 try:
                     x = x + pe_to_add
                 except RuntimeError as e:
@@ -87,7 +87,7 @@ class GNN(Module):
         if torch.isnan(hidden).any() or torch.isinf(hidden).any():
              # print("Warning: NaN/Inf detected in GNN input hidden.")
              hidden = torch.nan_to_num(hidden)
-        
+
         A_in = A[:, :, :A.shape[1]]
         A_out = A[:, :, A.shape[1]: 2 * A.shape[1]]
 
@@ -121,7 +121,7 @@ class GNN(Module):
             hidden = self.GNNCell(A, hidden)
         return hidden
 
-# -------------- 3. لایه انکودر آگاه از هدف (جدید) --------------
+# -------------- 3. لایه انکودر آگاه از هدف (بدون تغییر) --------------
 class TargetAwareEncoderLayer(Module):
     def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1, activation=F.relu):
         super(TargetAwareEncoderLayer, self).__init__()
@@ -133,7 +133,7 @@ class TargetAwareEncoderLayer(Module):
 
         # --- لایه Self-Attention اصلی ---
         self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
-        
+
         # --- لایه FeedForward ---
         self.linear1 = nn.Linear(d_model, dim_feedforward)
         self.dropout = nn.Dropout(dropout)
@@ -143,7 +143,7 @@ class TargetAwareEncoderLayer(Module):
         self.norm2 = nn.LayerNorm(d_model)
         self.dropout1 = nn.Dropout(dropout)
         self.dropout2 = nn.Dropout(dropout)
-        
+
         self.activation = activation
 
     def forward(self, src, candidate_embeddings_global, src_mask=None, src_key_padding_mask=None):
@@ -159,7 +159,7 @@ class TargetAwareEncoderLayer(Module):
         # attn_weights_sc: (B, L, N) - وزن توجه هر آیتم توالی به هر کاندیدا
         attn_score_sc = torch.matmul(q_sc, k_sc.transpose(0, 1)) / math.sqrt(q_sc.size(-1))
         attn_weights_sc = F.softmax(attn_score_sc, dim=-1)
-        
+
         # context_from_candidates: (B, L, D) - کانتکست وزندار شده از کاندیداها
         context_from_candidates = torch.matmul(attn_weights_sc, v_sc)
         # projected_context = self.context_projection(context_from_candidates) # در صورت نیاز به تغییر ابعاد
@@ -172,21 +172,21 @@ class TargetAwareEncoderLayer(Module):
         sa_output, _ = self.self_attn(src_enhanced, src_enhanced, src_enhanced,
                                       key_padding_mask=src_key_padding_mask,
                                       attn_mask=src_mask) # sa_output is (B, L, D)
-        
+
         # اولین اتصال باقیمانده و نرمال‌سازی (با src اصلی)
-        out1 = src + self.dropout1(sa_output) 
+        out1 = src + self.dropout1(sa_output)
         out1 = self.norm1(out1)
-        
+
         # 4. لایه FeedForward
         ff_output = self.linear2(self.dropout(self.activation(self.linear1(out1))))
-        
+
         # دومین اتصال باقیمانده و نرمال‌سازی
         out2 = out1 + self.dropout2(ff_output)
         out2 = self.norm2(out2)
-        
+
         return out2
 
-# -------------- 4. انکودر ترانسفورمر آگاه از هدف (جدید) --------------
+# -------------- 4. انکودر ترانسفورمر آگاه از هدف (بدون تغییر) --------------
 class TargetAwareTransformerEncoder(Module):
     def __init__(self, encoder_layer, num_layers, norm=None):
         super(TargetAwareTransformerEncoder, self).__init__()
@@ -198,13 +198,13 @@ class TargetAwareTransformerEncoder(Module):
         output = src
         for mod in self.layers:
             output = mod(output, candidate_embeddings_global, src_mask=mask, src_key_padding_mask=src_key_padding_mask)
-        
+
         if self.norm is not None:
             output = self.norm(output)
-            
+
         return output
 
-# -------------- 5. کلاس SessionGraph (تغییر یافته برای انکودر جدید) --------------
+# -------------- 5. کلاس SessionGraph (تغییر یافته برای انکودر جدید - بدون تغییر در این مرحله) --------------
 class SessionGraph(Module):
     def __init__(self, opt, n_node):
         super(SessionGraph, self).__init__()
@@ -221,7 +221,7 @@ class SessionGraph(Module):
 
         # --- لایه‌های انکودر ترانسفورمر آگاه از هدف ---
         self.pos_encoder = PositionalEncoding(self.hidden_size, getattr(opt, 'dropout', 0.1), max_len=5000)
-        
+
         ta_encoder_layer = TargetAwareEncoderLayer(
             d_model=self.hidden_size,
             nhead=getattr(opt, 'nhead', 2),
@@ -271,7 +271,7 @@ class SessionGraph(Module):
         sequence_lengths = torch.sum(mask.float(), 1).long()
         ht = torch.zeros(batch_size, self.hidden_size, device=device)
         valid_lengths_mask = sequence_lengths > 0
-        
+
         if valid_lengths_mask.any(): # فقط اگر طول‌های معتبر وجود داشته باشند
             # اطمینان از اینکه gather_indices منفی نشود
             gather_indices = (sequence_lengths[valid_lengths_mask] - 1).clamp(min=0)
@@ -285,7 +285,7 @@ class SessionGraph(Module):
 
         q1 = self.linear_one(ht).view(batch_size, 1, self.hidden_size)
         q2 = self.linear_two(hidden_transformer_output)
-        
+
         mask_expanded_alpha = mask.unsqueeze(-1).float()
         alpha_logits = self.linear_three(torch.sigmoid(q1 + q2))
         # اطمینان از اینکه hidden_transformer_output برای ماسک کردن خالی نیست
@@ -298,7 +298,7 @@ class SessionGraph(Module):
             alpha_logits_masked = alpha_logits.masked_fill(mask_expanded_alpha == 0, -float('inf'))
 
         alpha = F.softmax(alpha_logits_masked, dim=1)
-        
+
         # اطمینان از اینکه alpha و hidden_transformer_output دارای بعد توالی یکسان هستند
         if alpha.size(1) == hidden_transformer_output.size(1) and hidden_transformer_output.size(1) > 0:
              a = torch.sum(alpha * hidden_transformer_output * mask_expanded_alpha, 1)
@@ -332,7 +332,7 @@ class SessionGraph(Module):
                  beta_mask = mask.unsqueeze(1) # (b, 1, s)
                  beta_logits_masked = beta_logits.masked_fill(beta_mask == 0, -float('inf'))
                  beta = F.softmax(beta_logits_masked, dim=-1) # (b, n_node-1, s)
-                 
+
                  # target_ctx: (b, n_node-1, d)
                  # qt * mask_expanded_beta باید انجام شود اگر qt خالی نیست
                  target_ctx = torch.matmul(beta, qt * mask_expanded_beta) # qt از قبل ماسک شده است، اما برای اطمینان
@@ -342,7 +342,7 @@ class SessionGraph(Module):
 
             final_representation = a.unsqueeze(1) + target_ctx
             scores = torch.sum(final_representation * candidate_embeds.unsqueeze(0), dim=-1)
-            
+
         return scores
 
     def calculate_ssl_loss(self, emb1, emb2, temperature):
@@ -371,7 +371,7 @@ def trans_to_cpu(variable):
     else:
         return variable
 
-# -------------- تابع forward کلی (تغییر یافته برای انکودر جدید) --------------
+# -------------- تابع forward کلی (بدون تغییر در این مرحله) --------------
 def forward(model, i, data, is_train=True):
     alias_inputs, A, items, mask, targets = data.get_slice(i)
     # ... (انتقال به CUDA مانند قبل) ...
@@ -392,9 +392,9 @@ def forward(model, i, data, is_train=True):
     if torch.isnan(hidden_gnn).any() or torch.isinf(hidden_gnn).any():
         # print(f"Warning: NaN/Inf detected after GNN layer for batch slice {i}.")
         hidden_gnn = torch.nan_to_num(hidden_gnn)
-    
+
     batch_size_fwd, _ = alias_inputs.shape # _ به جای seq_len_max_in_data_get_slice
-    
+
     # 3. استخراج بازنمایی‌های توالی برای انکودر ترانسفورمر
     clamped_alias_inputs = alias_inputs.clamp(0, hidden_gnn.size(1) - 1)
     alias_expanded_for_gather = clamped_alias_inputs.unsqueeze(-1).expand(-1, -1, model.hidden_size)
@@ -402,14 +402,14 @@ def forward(model, i, data, is_train=True):
 
     # --- مسیر اصلی توصیه ---
     # 4. Positional Encoding
-    seq_hidden_pos = model.pos_encoder(seq_hidden_gnn) 
+    seq_hidden_pos = model.pos_encoder(seq_hidden_gnn)
 
     # 5. Target-Aware Transformer Encoder
     src_key_padding_mask = (mask_seq == 0) # (batch_size, seq_length)
-    
+
     # دریافت امبدینگ کاندیداها برای انکودر
     candidate_embeds_global = model.embedding.weight[1:].to(seq_hidden_pos.device) # (N-1, D)
-    
+
     hidden_transformer_output = model.transformer_encoder(
         src=seq_hidden_pos,
         candidate_embeddings_global=candidate_embeds_global, # پاس دادن کاندیداها
@@ -417,28 +417,28 @@ def forward(model, i, data, is_train=True):
     ) # Output: (batch, seq, feature)
 
     # 6. محاسبه امتیازات توصیه
-    scores = model.compute_scores(hidden_transformer_output, mask_seq) 
+    scores = model.compute_scores(hidden_transformer_output, mask_seq)
 
     # --- مسیر SSL (فقط در حالت آموزش) ---
-    ssl_loss = torch.tensor(0.0, device=scores.device) 
+    ssl_loss = torch.tensor(0.0, device=scores.device)
     if is_train and model.ssl_weight > 0:
         try:
             sequence_lengths_ssl = torch.sum(mask_seq.float(), 1).long()
             batch_indices_ssl = torch.arange(batch_size_fwd, device=alias_inputs.device) # استفاده از batch_size_fwd
             valid_lengths_mask_ssl = sequence_lengths_ssl > 0
-            
+
             last_item_node_indices_in_gnn = torch.zeros(batch_size_fwd, dtype=torch.long, device=alias_inputs.device)
 
             if valid_lengths_mask_ssl.any():
                  last_valid_seq_indices = (sequence_lengths_ssl[valid_lengths_mask_ssl] - 1).clamp(min=0)
                  last_item_node_indices_in_gnn[valid_lengths_mask_ssl] = alias_inputs[batch_indices_ssl[valid_lengths_mask_ssl], last_valid_seq_indices]
-            
+
             clamped_last_item_node_indices = last_item_node_indices_in_gnn.clamp(0, hidden_gnn.size(1) - 1)
 
             ssl_base_emb = torch.zeros(batch_size_fwd, model.hidden_size, device=hidden_gnn.device)
             if valid_lengths_mask_ssl.any() and hidden_gnn.size(1) > 0: # اطمینان از اینکه hidden_gnn خالی نیست
                 ssl_base_emb[valid_lengths_mask_ssl] = hidden_gnn[batch_indices_ssl[valid_lengths_mask_ssl], clamped_last_item_node_indices[valid_lengths_mask_ssl]]
-            
+
             ssl_emb1 = F.dropout(ssl_base_emb, p=model.ssl_dropout_rate, training=True)
             ssl_emb2 = F.dropout(ssl_base_emb, p=model.ssl_dropout_rate, training=True)
             ssl_loss = model.calculate_ssl_loss(ssl_emb1, ssl_emb2, model.ssl_temp)
@@ -454,8 +454,7 @@ def forward(model, i, data, is_train=True):
     return targets_final.to(scores.device), scores, ssl_loss
 
 
-# -------------- تابع آموزش و تست (بدون تغییر عمده در منطق اصلی) --------------
-# (تابع train_test مانند قبل باقی می‌ماند، فقط باید مطمئن شویم که forward به درستی فراخوانی می‌شود)
+# -------------- تابع آموزش و تست (تغییر یافته برای Precision@20) --------------
 def train_test(model, train_data, test_data, opt): # اضافه کردن opt
     scaler = GradScaler(enabled=torch.cuda.is_available())
 
@@ -471,7 +470,7 @@ def train_test(model, train_data, test_data, opt): # اضافه کردن opt
 
         with autocast(enabled=torch.cuda.is_available()):
             targets, scores, ssl_loss_val = forward(model, i_slice, train_data, is_train=True) # تغییر نام ssl_loss به ssl_loss_val
-            
+
             valid_targets_mask = (targets > 0) & (targets <= model.n_node)
             rec_loss = torch.tensor(0.0, device=scores.device) # مقدار پیش‌فرض
 
@@ -496,7 +495,7 @@ def train_test(model, train_data, test_data, opt): # اضافه کردن opt
 
             if torch.isnan(loss).any() or torch.isinf(loss).any():
                  # print(f"Warning: NaN/Inf detected in total loss for training slice {step}. Skipping batch.")
-                 continue 
+                 continue
 
         if torch.cuda.is_available():
              scaler.scale(loss).backward()
@@ -519,7 +518,7 @@ def train_test(model, train_data, test_data, opt): # اضافه کردن opt
                    (step + 1, len(slices), avg_loss, avg_rec_loss, avg_ssl_loss))
 
     model.scheduler.step()
-    
+
     len_slices = len(slices) if slices else 1 # جلوگیری از تقسیم بر صفر
     print('\tAvg Loss:\t%.4f' % (total_loss / len_slices))
     print('\tAvg Rec Loss:\t%.4f' % (total_rec_loss / len_slices))
@@ -528,27 +527,34 @@ def train_test(model, train_data, test_data, opt): # اضافه کردن opt
 
     print('start predicting: ', datetime.datetime.now())
     model.eval()
-    hit, mrr = [], []
+    hit, mrr, precision = [], [], [] # اضافه شدن لیست precision
+    k_metric = 20 # مقدار k برای Recall@k, MRR@k, Precision@k
+
     test_slices_eval = test_data.generate_batch(model.batch_size) # تغییر نام slices
     with torch.no_grad():
         for k_slice_eval in test_slices_eval: # تغییر نام i
             targets, scores, _ = forward(model, k_slice_eval, test_data, is_train=False)
-            sub_scores_indices = scores.topk(20)[1] 
+            sub_scores_indices = scores.topk(k_metric)[1]
             sub_scores_indices_cpu = trans_to_cpu(sub_scores_indices).detach().numpy()
             targets_cpu = trans_to_cpu(targets).detach().numpy()
 
             for score_idx_list, target_item_id in zip(sub_scores_indices_cpu, targets_cpu):
-                 if target_item_id > 0: 
+                 if target_item_id > 0:
                     target_item_id_zero_based = target_item_id - 1
                     is_hit = np.isin(target_item_id_zero_based, score_idx_list)
                     hit.append(is_hit)
+
                     if is_hit:
                         rank_list = np.where(score_idx_list == target_item_id_zero_based)[0]
-                        rank = rank_list[0] + 1 if len(rank_list) > 0 else float('inf') # باید همیشه پیدا شود اگر is_hit
+                        rank = rank_list[0] + 1 if len(rank_list) > 0 else float('inf')
                         mrr.append(1.0 / rank)
+                        precision.append(1.0 / k_metric) # اگر آیتم هدف پیدا شد
                     else:
                         mrr.append(0.0)
+                        precision.append(0.0) # اگر آیتم هدف پیدا نشد
 
     hit_rate = np.mean(hit) * 100 if hit else 0.0
     mrr_score = np.mean(mrr) * 100 if mrr else 0.0
-    return hit_rate, mrr_score
+    precision_score = np.mean(precision) * 100 if precision else 0.0 # محاسبه میانگین precision
+
+    return hit_rate, mrr_score, precision_score # برگرداندن precision_score
