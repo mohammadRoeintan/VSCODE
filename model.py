@@ -7,6 +7,10 @@ from torch.nn import Module, Parameter
 import torch.nn.functional as F
 import copy # برای deepcopy در TargetAwareTransformerEncoder
 from torch.cuda.amp import autocast, GradScaler
+import pytz # <--- کتابخانه pytz برای کار با مناطق زمانی اضافه شد
+
+# تعریف منطقه زمانی ایران (IRST: UTC+03:30)
+IR_TIMEZONE = pytz.timezone('Asia/Tehran')
 
 # -------------- 1. کلاس PositionalEncoding --------------
 class PositionalEncoding(Module):
@@ -336,7 +340,11 @@ def forward(model, i, data, is_train=True):
 def train_test(model, train_data, test_data, opt): # opt به عنوان آرگومان به تابع اضافه شده است
     scaler = GradScaler(enabled=torch.cuda.is_available())
 
-    print('start training: ', datetime.datetime.now())
+    # گرفتن زمان شروع آموزش به وقت ایران
+    now_utc_train_start = datetime.datetime.now(datetime.timezone.utc)
+    now_ir_train_start = now_utc_train_start.astimezone(IR_TIMEZONE)
+    print(f'start training: {now_ir_train_start.strftime("%Y-%m-%d %H:%M:%S %Z (%z)")}')
+
     model.train()
     total_loss = 0.0
     total_rec_loss = 0.0
@@ -395,7 +403,11 @@ def train_test(model, train_data, test_data, opt): # opt به عنوان آرگ�
     print(f'\tAvg Rec Loss:\t{total_rec_loss / len_slices_val:.4f}')
     print(f'\tAvg SSL Loss:\t{total_ssl_loss / len_slices_val:.4f}')
 
-    print('start predicting: ', datetime.datetime.now())
+    # گرفتن زمان شروع پیش‌بینی به وقت ایران
+    now_utc_predict_start = datetime.datetime.now(datetime.timezone.utc)
+    now_ir_predict_start = now_utc_predict_start.astimezone(IR_TIMEZONE)
+    print(f'start predicting: {now_ir_predict_start.strftime("%Y-%m-%d %H:%M:%S %Z (%z)")}')
+
     model.eval()
     hit, mrr, precision = [], [], []
     k_metric = 20 # برای Recall@20, MRR@20, Precision@20
