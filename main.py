@@ -1,64 +1,88 @@
 import torch
 from torch.optim import Adam
-from model_pyg_advanced import SessionGraph # نام فایل مدل جدید
-from utils_pyg_advanced import generate_dataloader_pyg_advanced # نام فایل utils جدید
+from model_pyg_final_attempt import SessionGraph # نام فایل مدل جدید
+from utils_pyg_final_attempt import generate_dataloader_pyg_final # نام فایل utils جدید
 import numpy as np
 import os
 import pickle
+import argparse # بازگرداندن argparse
 
-# --- پارامترها (باید از argparse مثل کد اصلی شما بیایند) ---
-class OptMock: # یک کلاس ساده برای شبیه‌سازی opt از argparse
-    def __init__(self):
-        self.dataset = 'sample_pyg_adv'
-        self.hiddenSize = 100
-        self.batchSize = 64 # کوچکتر برای تست اولیه
-        self.epoch = 5
-        self.lr = 0.001
-        self.step = 2 # تعداد لایه‌های GNN (num_gnn_steps)
-        self.nhead = 2 # برای TargetAware (nhead_transformer)
-        self.nlayers = 1 # برای TargetAware (nlayers_transformer)
-        self.dropout = 0.2 # برای PositionalEncoding و TargetAware (dropout_transformer)
-        self.ff_hidden = 256 # برای TargetAware (dim_feedforward)
-        self.ssl_weight = 0.0 # فعلا SSL غیرفعال
-        self.ssl_temp = 0.5
-        self.ssl_dropout_rate = 0.2
-        self.nonhybrid = False
-        self.n_node = 310 # مقدار پیش‌فرض, باید با داده شما تنظیم شود
-
-opt = OptMock()
-# -------------------------------------------------------------
+# --- آرگومان‌ها (از کد اصلی شما) ---
+parser = argparse.ArgumentParser()
+parser.add_argument('--dataset', default='sample_final', help='dataset name')
+parser.add_argument('--batchSize', type=int, default=64, help='input batch size') # کوچکتر برای تست
+parser.add_argument('--hiddenSize', type=int, default=100, help='hidden state size')
+parser.add_argument('--epoch', type=int, default=5, help='the number of epochs to train for') # کمتر برای تست
+parser.add_argument('--lr', type=float, default=0.001, help='learning rate')
+parser.add_argument('--lr_dc', type=float, default=0.1, help='learning rate decay rate')
+parser.add_argument('--lr_dc_step', type=int, default=3, help='the number of steps after which the learning rate decay')
+parser.add_argument('--l2', type=float, default=1e-5, help='l2 penalty')
+parser.add_argument('--step', type=int, default=1, help='gnn propogation steps (num_gnn_steps)')
+parser.add_argument('--patience', type=int, default=10, help='the number of epoch to wait before early stop ')
+parser.add_argument('--nonhybrid', action='store_true', help='only use the global preference to predict')
+# --data_subset_ratio و validation از کد اصلی شما می‌توانند اضافه شوند
+parser.add_argument('--ssl_weight', type=float, default=0.0, help='Weight for Self-Supervised Learning Loss (فعلا غیرفعال)')
+parser.add_argument('--ssl_temp', type=float, default=0.5, help='Temperature parameter for InfoNCE Loss')
+parser.add_argument('--ssl_dropout_rate', type=float, default=0.2, help='Dropout rate for SSL augmentation')
+parser.add_argument('--nhead', type=int, default=2, help='number of heads in transformer encoder')
+parser.add_argument('--nlayers', type=int, default=1, help='number of layers in transformer encoder')
+parser.add_argument('--ff_hidden', type=int, default=256, help='dimension of feedforward network model in transformer')
+parser.add_argument('--dropout', type=float, default=0.2, help='dropout rate in transformer/positional encoding')
+opt = parser.parse_args()
+# ------------------------------------------
 
 # --- بارگذاری داده‌ها ---
-data_dir = "./datasets" # مسیر دیتاست خود را تنظیم کنید
+data_dir = "./datasets"
 train_sessions, train_targets = [], []
 test_sessions, test_targets = [], []
+n_node_auto = 20 # مقدار پیش‌فرض اگر دیتاست یافت نشد
 try:
     with open(os.path.join(data_dir, opt.dataset, "train.txt"), 'rb') as f:
         train_sessions, train_targets = pickle.load(f)
     with open(os.path.join(data_dir, opt.dataset, "test.txt"), 'rb') as f:
         test_sessions, test_targets = pickle.load(f)
+    
+    all_items_for_n_node = set()
+    for sess_list in [train_sessions, test_sessions]:
+        for sess in sess_list:
+            for item in sess:
+                if isinstance(item, (int, float)) and not np.isnan(item) and int(item) > 0:
+                    all_items_for_n_node.add(int(item))
+    for target_list in [train_targets, test_targets]:
+        for target_item in target_list:
+            if isinstance(target_item, (int, float)) and not np.isnan(target_item) and int(target_item) > 0:
+                all_items_for_n_node.add(int(target_item))
+    if all_items_for_n_node:
+        n_node_auto = max(all_items_for_n_node) + 1
+
 except FileNotFoundError:
-    print(f"Warning: Data files not found in {os.path.join(data_dir, opt.dataset)}")
-    print("Creating dummy data for 'sample_pyg_adv'...")
-    train_sessions = [[1,2,3,4], [2,3,4,2,5], [5,1,6], [6,7,8,9,6,10], [11,12],[1],[1,2]]
-    train_targets = [5,1,7,11,1,2,3]
-    test_sessions = [[1,2,3], [3,4,5,6],[7]]
-    test_targets = [4,2,8]
+    print(f"Warning: Data files not found for dataset '{opt.dataset}'. Creating dummy data...")
+    train_sessions = [[1,2,3,4], [2,3,4,2,5], [5,1,6], [6,7,8,9,6,10], [11,12],[1],[1,2], [0,0]]
+    train_targets = [5,1,7,11,1,2,3,1] # هدف برای جلسه پدینگ
+    test_sessions = [[1,2,3], [3,4,5,6],[7], [0]]
+    test_targets = [4,2,8,1]
     all_items = set(sum(train_sessions, []) + sum(test_sessions, []) + train_targets + test_targets)
-    if all_items: opt.n_node = max(all_items) + 1
-    else: opt.n_node = 20
-    print(f"Using dummy data with n_node = {opt.n_node}")
+    if all_items: n_node_auto = max(item for item in all_items if item > 0) + 1 if any(item > 0 for item in all_items) else 20
+    else: n_node_auto = 20
+    print(f"Using dummy data with n_node = {n_node_auto}")
+
+opt.n_node = n_node_auto # استفاده از n_node محاسبه شده یا پیش‌فرض
 # -------------------------------------------------------------
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Using device: {device}")
-if opt.n_node <=1 : opt.n_node = 20 # حداقل مقدار برای n_node
+if opt.n_node <=1 :
+    print("Error: n_node must be > 1.")
+    exit()
 
-model = SessionGraph(opt, n_node=opt.n_node).to(device) # پاس دادن opt به مدل
-optimizer = Adam(model.parameters(), lr=opt.lr)
+model = SessionGraph(opt, n_node=opt.n_node).to(device)
+optimizer = Adam(model.parameters(), lr=opt.lr, weight_decay=opt.l2 if hasattr(opt, 'l2') else 1e-5)
+# Scheduler را هم می‌توانید از opt بخوانید
+scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=opt.lr_dc_step if hasattr(opt, 'lr_dc_step') else 3, gamma=opt.lr_dc if hasattr(opt, 'lr_dc') else 0.1)
 
-train_loader = generate_dataloader_pyg_advanced(train_sessions, train_targets, batch_size=opt.batchSize, shuffle=True)
-test_loader = generate_dataloader_pyg_advanced(test_sessions, test_targets, batch_size=opt.batchSize, shuffle=False)
+
+train_loader = generate_dataloader_pyg_final(train_sessions, train_targets, batch_size=opt.batchSize, shuffle=True)
+test_loader = generate_dataloader_pyg_final(test_sessions, test_targets, batch_size=opt.batchSize, shuffle=False)
 
 checkpoint_dir = f"./checkpoints_{opt.dataset}"
 os.makedirs(checkpoint_dir, exist_ok=True)
@@ -73,99 +97,81 @@ for epoch in range(opt.epoch):
     num_batches_train = 0
 
     for batch_data in train_loader:
-        # collate_fn ممکن است None برای pyg_batch برگرداند اگر تمام جلسات خالی بودند
-        if batch_data[0] is None: # batch_data[0] همان pyg_batch است
-            # print("Skipping a batch with no valid graphs.")
-            continue
-        
         pyg_batch, original_sequences_padded, attention_masks, targets, original_sequence_lens = batch_data
+        
+        if original_sequences_padded.numel() == 0 : # اگر بچ کاملا خالی باشد
+             # print("Skipping completely empty batch in training (no sequences).")
+             continue
+        if pyg_batch is None and torch.all(original_sequence_lens == 0): # اگر هیچ گراف معتبری نیست و همه توالی‌ها خالی‌اند
+             # print("Skipping batch with no valid graphs and all empty sequences.")
+             continue
 
-        # اگر به هر دلیلی، پس از collate، بچ خالی شد (مثلاً فقط جلسات خالی داشتیم)
-        if pyg_batch is not None and (pyg_batch.x is None or pyg_batch.x.numel() == 0) and original_sequences_padded.numel() == 0:
-            # print("Skipping completely empty batch after collate.")
-            continue
 
-
-        # انتقال همه چیز به دستگاه
-        if pyg_batch is not None: pyg_batch = pyg_batch.to(device)
+        if pyg_batch is not None: pyg_batch = pyg_batch.to(device) # ممکن است None باشد
         original_sequences_padded = original_sequences_padded.to(device)
         attention_masks = attention_masks.to(device)
-        targets = targets.to(device).squeeze() # (B)
+        targets = targets.to(device).squeeze()
         original_sequence_lens = original_sequence_lens.to(device)
-
 
         optimizer.zero_grad(set_to_none=True)
         scores, ssl_loss = model(pyg_batch, original_sequences_padded, attention_masks, original_sequence_lens, is_train=True)
 
-        # مدیریت بچ خالی در خروجی مدل
         if scores is None or scores.numel() == 0:
             # print("Skipping batch due to empty scores from model.")
             continue
 
-
-        valid_targets_mask = (targets > 0) # فقط اهداف معتبر
-        num_valid_targets = valid_targets_mask.sum()
+        valid_targets_mask = (targets > 0) # اهداف معتبر (ID > 0)
+        num_valid_targets = valid_targets_mask.sum().item()
 
         rec_loss_batch = torch.tensor(0.0, device=device)
         if num_valid_targets > 0:
-            # scores باید (num_valid_targets_in_batch, n_node-1) باشد اگر بچ فیلتر شده
-            # یا (B, n_node-1) و targets (B) باشد
-            # در اینجا scores برای تمام B آیتم بچ است (حتی آنها که جلسه GNN خالی داشتند)
-            # اما targets هم برای تمام B آیتم بچ است.
-            # پس valid_targets_mask را روی هر دو اعمال می‌کنیم.
-            
-            # اطمینان از اینکه scores و targets[valid_targets_mask] ابعاد سازگار دارند
-            # scores باید برای تمام نمونه‌های بچ باشد، targets هم
-            # scores (B, n_node-1)
-            # targets (B) شامل IDهای از 1 تا n_node
-            # target_for_loss (B_valid) شامل IDهای از 0 تا n_node-2
-            
-            # فقط برای نمونه‌هایی که هدف معتبر دارند loss را محاسبه می‌کنیم
             current_scores = scores[valid_targets_mask]
-            current_targets_for_loss = (targets[valid_targets_mask] - 1).clamp(0, opt.n_node - 2)
-
+            current_targets_for_loss = (targets[valid_targets_mask] - 1).clamp(0, opt.n_node - 2) # -1 برای 0پایه، -1 چون scores برای n_node-1 کلاس است
+            
             if current_scores.shape[0] > 0 and current_scores.shape[0] == current_targets_for_loss.shape[0]:
-                 rec_loss_batch = model.loss_function(current_scores, current_targets_for_loss)
+                 if current_scores.shape[1] == opt.n_node -1 : # بررسی تعداد کلاس‌ها
+                    rec_loss_batch = model.loss_function(current_scores, current_targets_for_loss)
+                 # else:
+                     # print(f"Score class dimension mismatch: {current_scores.shape[1]} vs {opt.n_node-1}")
             # else:
-                 # print(f"Skipping loss for batch due to shape mismatch or no valid targets after filtering. Scores shape: {current_scores.shape}, Targets shape: {current_targets_for_loss.shape}")
+                # print(f"Shape mismatch for loss: scores_f {current_scores.shape}, targets_f {current_targets_for_loss.shape}")
 
 
-        loss_batch = rec_loss_batch + ssl_loss # ssl_loss از مدل با وزن می‌آید
+        loss_batch = rec_loss_batch + ssl_loss
+        if torch.isnan(loss_batch) or torch.isinf(loss_batch) or loss_batch.item() == 0 and rec_loss_batch.item() == 0 and num_valid_targets > 0 : # بررسی loss صفر مشکوک
+            # print(f"Warning: Potentially problematic loss: {loss_batch.item()}. Rec: {rec_loss_batch.item()}, SSL: {ssl_loss.item()}")
+            if torch.isnan(loss_batch) or torch.isinf(loss_batch): continue
 
-        if torch.isnan(loss_batch) or torch.isinf(loss_batch):
-            # print(f"NaN or Inf loss detected: {loss_batch.item()}. Skipping backward.")
-            continue
 
         loss_batch.backward()
         optimizer.step()
 
         total_loss_epoch += loss_batch.item()
-        total_rec_loss_epoch += rec_loss_batch.item() # rec_loss_batch می‌تواند صفر باشد
-        total_ssl_loss_epoch += ssl_loss.item()
+        if rec_loss_batch is not None: total_rec_loss_epoch += rec_loss_batch.item()
+        if ssl_loss is not None: total_ssl_loss_epoch += ssl_loss.item()
         num_batches_train += 1
+    
+    scheduler.step() # آپدیت نرخ یادگیری
 
     avg_total_loss = total_loss_epoch / num_batches_train if num_batches_train > 0 else 0
     avg_rec_loss = total_rec_loss_epoch / num_batches_train if num_batches_train > 0 else 0
     avg_ssl_loss = total_ssl_loss_epoch / num_batches_train if num_batches_train > 0 else 0
 
     model.eval()
-    all_hits_eval = []
-    all_mrrs_eval = []
-    all_precisions_eval = []
+    all_hits_eval, all_mrrs_eval, all_precisions_eval = [], [], []
     k_metric = 20
 
     with torch.no_grad():
         for batch_data in test_loader:
-            if batch_data[0] is None: continue
             pyg_batch, original_sequences_padded, attention_masks, targets, original_sequence_lens = batch_data
-            if pyg_batch is not None and (pyg_batch.x is None or pyg_batch.x.numel() == 0) and original_sequences_padded.numel() == 0: continue
+            if original_sequences_padded.numel() == 0 : continue
+            if pyg_batch is None and torch.all(original_sequence_lens == 0): continue
 
             if pyg_batch is not None: pyg_batch = pyg_batch.to(device)
             original_sequences_padded = original_sequences_padded.to(device)
             attention_masks = attention_masks.to(device)
             targets = targets.to(device).squeeze()
             original_sequence_lens = original_sequence_lens.to(device)
-
 
             scores = model(pyg_batch, original_sequences_padded, attention_masks, original_sequence_lens, is_train=False)
             if scores is None or scores.numel() == 0: continue
@@ -185,11 +191,11 @@ for epoch in range(opt.epoch):
                 all_hits_eval.append(1 if is_hit else 0)
                 if is_hit:
                     rank_list = np.where(predicted_ids == target_id)[0]
-                    if len(rank_list) > 0: # اطمینان از اینکه آیتم پیدا شده
+                    if len(rank_list) > 0:
                         rank = rank_list[0] + 1
                         all_mrrs_eval.append(1.0 / rank)
                         all_precisions_eval.append(1.0 / k_metric)
-                    else: # نباید اتفاق بیفتد اگر is_hit درست است
+                    else:
                         all_mrrs_eval.append(0.0)
                         all_precisions_eval.append(0.0)
                 else:
@@ -205,8 +211,11 @@ for epoch in range(opt.epoch):
 
     if recall_at_20_epoch > best_recall_at_20:
         best_recall_at_20 = recall_at_20_epoch
-        save_path = os.path.join(checkpoint_dir, f"model_best_pyg_adv.pth")
+        save_path = os.path.join(checkpoint_dir, f"model_best_pyg_final.pth")
         torch.save(model.state_dict(), save_path)
         print(f"✅ Best Model saved to {save_path} (Recall@{k_metric}: {best_recall_at_20:.2f}%)")
 
 print("Training finished.")
+
+if __name__ == '__main__':
+    main()
