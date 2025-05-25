@@ -6,3 +6,4 @@ scipy
 tqdm
 pickle-mixin
 pytz
+torch_geometric
