@@ -1,295 +1,224 @@
-import argparse
-import pickle
-import time
-import os
-# import random # اگر می‌خواهید نمونه‌برداری تصادفی انجام دهید، این را اضافه کنید
-from utils import Data, split_validation
-# model.py شامل SessionGraph, train_test است.
-from model import SessionGraph, train_test
 import torch
+from torch.optim import Adam
+# از model، کلاس SessionGraph و تابع train_test (اگر هنوز استفاده می‌شود) را ایمپورت کنید
+# اما با توجه به تغییرات، train_test ممکن است نیاز به بازنویسی داشته باشد یا منطقش به main منتقل شود.
+# در اینجا، منطق حلقه آموزش و تست را در خود main نگه می‌داریم.
+from model_pyg_corrected import SessionGraph, PositionalEncoding # فرض می‌کنیم مدل در این فایل است
+from utils_pyg_corrected import generate_dataloader_pyg # فرض می‌کنیم utils در این فایل است
 import numpy as np
+import os
+import pickle # برای بارگذاری داده‌های pickle شده
 
-parser = argparse.ArgumentParser()
-parser.add_argument('--dataset', default='sample', help='dataset name: diginetica/yoochoose1_4/yoochoose1_64/sample')
-parser.add_argument('--batchSize', type=int, default=100, help='input batch size')
-parser.add_argument('--hiddenSize', type=int, default=100, help='hidden state size')
-parser.add_argument('--epoch', type=int, default=30, help='the number of epochs to train for')
-parser.add_argument('--lr', type=float, default=0.001, help='learning rate')
-parser.add_argument('--lr_dc', type=float, default=0.1, help='learning rate decay rate')
-parser.add_argument('--lr_dc_step', type=int, default=3, help='the number of steps after which the learning rate decay')
-parser.add_argument('--l2', type=float, default=1e-5, help='l2 penalty')
-parser.add_argument('--step', type=int, default=1, help='gnn propogation steps')
-parser.add_argument('--patience', type=int, default=10, help='the number of epoch to wait before early stop ')
-parser.add_argument('--nonhybrid', action='store_true', help='only use the global preference to predict')
-parser.add_argument('--validation', action='store_true', help='validation')
-parser.add_argument('--valid_portion', type=float, default=0.1, help='split the portion of training set as validation set')
-# --- آرگومان جدید برای محدود کردن داده ---
-parser.add_argument('--data_subset_ratio', type=float, default=1.0, help='Factor to reduce dataset size (e.g., 0.1 for 10%). Default is 1.0 (full data).')
+# --- پارامترها (می‌توانید از argparse مانند کد اصلی استفاده کنید) ---
+# برای سادگی، مقادیر ثابت در نظر گرفته شده‌اند. شما باید argparse را بازگردانید.
+class Opt: # یک کلاس ساده برای شبیه‌سازی opt
+    dataset = 'sample_pyg' # نام دیتاست خود را بگذارید
+    hiddenSize = 100
+    batchSize = 128 # در generate_dataloader_pyg استفاده می‌شود
+    epoch = 10
+    lr = 0.001
+    # پارامترهای GNN
+    num_gnn_steps = 1 # تعداد لایه‌های GatedGraphConv
+    # پارامترهای Transformer
+    nhead_transformer = 2
+    nlayers_transformer = 1
+    dropout_transformer = 0.2
+    # پارامتر SSL
+    ssl_weight = 0.0 # فعلاً SSL را غیرفعال می‌کنیم تا روی بخش اصلی تمرکز کنیم
+    # سایر پارامترها
+    nonhybrid = False # یا True، بسته به منطق امتیازدهی شما
+    n_node = 310 # مقدار پیش‌فرض برای sample, باید با داده شما تنظیم شود
 
-# --- پارامترهای SSL ---
-parser.add_argument('--ssl_weight', type=float, default=0.1, help='Weight for Self-Supervised Learning Loss')
-parser.add_argument('--ssl_temp', type=float, default=0.5, help='Temperature parameter for InfoNCE Loss')
-parser.add_argument('--ssl_dropout_rate', type=float, default=0.2, help='Dropout rate for SSL augmentation')
+opt = Opt()
+# -------------------------------------------------------------
 
-# --- پارامترهای انکودر ترانسفورمر ---
-parser.add_argument('--nhead', type=int, default=2, help='number of heads in transformer encoder')
-parser.add_argument('--nlayers', type=int, default=2, help='number of layers in transformer encoder')
-parser.add_argument('--ff_hidden', type=int, default=256, help='dimension of feedforward network model in transformer')
-parser.add_argument('--dropout', type=float, default=0.1, help='dropout rate in transformer')
+# --- بارگذاری داده‌ها (باید با فرمت pickle شما سازگار باشد) ---
+# فرض می‌کنیم train.txt و test.txt شامل تاپل (list_of_sessions, list_of_targets) هستند
+data_dir = "./datasets" # مسیر دیتاست خود را تنظیم کنید
+try:
+    with open(os.path.join(data_dir, opt.dataset, "train.txt"), 'rb') as f:
+        train_sessions, train_targets = pickle.load(f)
+    with open(os.path.join(data_dir, opt.dataset, "test.txt"), 'rb') as f:
+        test_sessions, test_targets = pickle.load(f)
+except FileNotFoundError:
+    print(f"Error: Data files not found in {os.path.join(data_dir, opt.dataset)}")
+    print("Please create dummy train.txt and test.txt for 'sample_pyg' or provide correct dataset.")
+    # ایجاد داده نمونه برای تست (اگر فایل‌ها موجود نیستند)
+    print("Creating dummy data for 'sample_pyg'...")
+    train_sessions = [[1,2,3], [2,3,4,2], [5,1], [6,7,8,9,6]]
+    train_targets = [4,5,2,6]
+    test_sessions = [[1,2], [3,4,5]]
+    test_targets = [3,2]
+    # به‌روزرسانی n_node بر اساس داده نمونه
+    all_items = set(sum(train_sessions, []) + sum(test_sessions, []) + train_targets + test_targets)
+    if all_items:
+      opt.n_node = max(all_items) + 1
+    else:
+      opt.n_node = 10 # یک مقدار کوچک اگر داده خالی است
+    print(f"Using dummy data with n_node = {opt.n_node}")
 
-opt = parser.parse_args()
-print(opt)
+# -------------------------------------------------------------
+
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Using device: {device}")
 
+# اطمینان از اینکه n_node به درستی مقداردهی شده (باید بزرگتر از بیشترین ID آیتم باشد)
+# این بخش باید با دقت بیشتری بر اساس داده‌های واقعی شما تنظیم شود.
+# اگر از داده نمونه بالا استفاده می‌کنید، n_node باید حداقل max(all_items) + 1 باشد.
+# opt.n_node = 310 # یا مقدار صحیح برای دیتاست شما
 
-def main():
-    base_dataset_path = './datasets/'
+model = SessionGraph(
+    n_node=opt.n_node,
+    hidden_size=opt.hiddenSize,
+    num_gnn_steps=opt.num_gnn_steps,
+    ssl_weight=opt.ssl_weight,
+    nhead_transformer=opt.nhead_transformer,
+    nlayers_transformer=opt.nlayers_transformer,
+    dropout_transformer=opt.dropout_transformer,
+    nonhybrid=opt.nonhybrid
+).to(device)
 
-    if opt.dataset == 'sample':
-        train_data_file = os.path.join(base_dataset_path, 'train.txt')
-        test_data_file = os.path.join(base_dataset_path, 'test.txt')
-    else:
-        train_data_file = os.path.join(base_dataset_path, opt.dataset, 'train.txt')
-        test_data_file = os.path.join(base_dataset_path, opt.dataset, 'test.txt')
+optimizer = Adam(model.parameters(), lr=opt.lr)
 
-    print(f"Loading training data from: {train_data_file}")
-    train_data_loaded_full = None # برای محاسبه n_node بر اساس داده کامل
-    try:
-        with open(train_data_file, 'rb') as f:
-            train_data_loaded_full = pickle.load(f) # ابتدا داده کامل بارگذاری می‌شود
-        train_data_loaded = train_data_loaded_full # کپی برای کار و محدودسازی
-        if not (isinstance(train_data_loaded, tuple) and len(train_data_loaded) == 2 and
-                isinstance(train_data_loaded[0], list) and isinstance(train_data_loaded[1], list)):
-            print(f"Error: Training data at {train_data_file} is not in the expected format (list_of_sessions, list_of_targets).")
-            return
-    except FileNotFoundError:
-        print(f"Error: Training data file not found at {train_data_file}")
-        return
-    except Exception as e:
-        print(f"Error loading or processing training data: {e}")
-        return
+# ایجاد DataLoader با استفاده از تابع جدید
+# (مطمئن شوید sessions و targets به درستی بارگذاری شده‌اند)
+train_loader = generate_dataloader_pyg(train_sessions, train_targets, batch_size=opt.batchSize, shuffle=True, num_workers=0)
+test_loader = generate_dataloader_pyg(test_sessions, test_targets, batch_size=opt.batchSize, shuffle=False, num_workers=0)
 
-    # --- محدود کردن داده آموزشی بر اساس data_subset_ratio ---
-    if 0 < opt.data_subset_ratio < 1.0:
-        train_sessions, train_targets = train_data_loaded # استفاده از داده کپی شده
-        num_original_train_samples = len(train_sessions)
-        if num_original_train_samples > 0:
-            num_train_samples_to_keep = int(num_original_train_samples * opt.data_subset_ratio)
-            if num_train_samples_to_keep == 0: # حداقل یک نمونه نگه دار اگر داده اصلی وجود دارد
-                num_train_samples_to_keep = 1
+
+checkpoint_dir = f"./checkpoints_{opt.dataset}"
+os.makedirs(checkpoint_dir, exist_ok=True)
+best_recall_at_20 = 0.0
+
+print(f"Starting training for {opt.epoch} epochs...")
+for epoch in range(opt.epoch):
+    model.train()
+    total_loss_epoch = 0
+    total_rec_loss_epoch = 0
+    total_ssl_loss_epoch = 0
+    num_batches_train = 0
+
+    for pyg_batch, original_sequences_padded, attention_masks, targets in train_loader:
+        if pyg_batch.x is None or pyg_batch.x.numel() == 0 : # اگر بچ خالی از گراف معتبر باشد
+            # print("Skipping empty batch in training.")
+            continue
+
+        pyg_batch = pyg_batch.to(device)
+        original_sequences_padded = original_sequences_padded.to(device)
+        attention_masks = attention_masks.to(device) # ماسک بولی
+        targets = targets.to(device).squeeze() # (B)
+
+        optimizer.zero_grad()
+        # فراخوانی forward مدل با ورودی‌های جدید
+        scores, ssl_loss = model(pyg_batch, original_sequences_padded, attention_masks, is_train=True)
+
+        # محاسبه loss توصیه
+        # scores: (B, n_node-1) , targets: (B) شامل IDهای اصلی از 1 تا n_node-1
+        # تبدیل اهداف به اندیس 0پایه برای CrossEntropyLoss
+        # اهداف باید در محدوده [0, num_classes-1] باشند. در اینجا num_classes = n_node-1 (چون پدینگ 0 را حذف می‌کنیم)
+        # پس اهداف اصلی (1 تا N) باید به (0 تا N-1) نگاشت شوند.
+        valid_targets_mask = (targets > 0) # فقط اهداف معتبر (نه پدینگ اگر در داده باشد)
+        if valid_targets_mask.sum() == 0: # اگر هیچ هدف معتبری در بچ نیست
+            # print("Skipping batch with no valid targets.")
+            rec_loss_batch = torch.tensor(0.0, device=device)
+        else:
+            # اطمینان از اینکه ابعاد scores و targets[valid_targets_mask] برای loss سازگارند
+            # scores باید برای تمام نمونه‌های بچ باشد، targets هم
+            # CrossEntropyLoss انتظار دارد scores (B, C) و target (B) باشد
+            # scores (B, n_node-1)
+            # targets (B) شامل IDهای از 1 تا n_node
+            # target_for_loss (B_valid) شامل IDهای از 0 تا n_node-2
             
-            # یا به سادگی N نمونه اول را بگیرید:
-            train_data_loaded = (train_sessions[:num_train_samples_to_keep], train_targets[:num_train_samples_to_keep])
-            print(f"--- Limiting training data to {len(train_data_loaded[0])} samples ({opt.data_subset_ratio*100:.1f}%) for testing. ---")
-        elif num_original_train_samples == 0: # اگر داده اصلی خالی بود
-             print("--- Training data is empty, no subsetting performed. ---")
-    # ---------------------------------------------------------
-
-    train_set_for_data_obj = train_data_loaded
-    test_data_for_data_obj = ([], [])
-    test_data_loaded_full = ([], []) # برای محاسبه n_node بر اساس داده کامل تست
-
-    if opt.validation:
-        if not train_data_loaded[0] or not train_data_loaded[1]: # train_data_loaded اینجا ممکن است محدود شده باشد
-            print("Error: Training data (potentially subsetted) is empty, cannot perform validation split.")
-            return
-        print(f"Splitting training data for validation (portion: {opt.valid_portion}) from {len(train_data_loaded[0])} samples.")
-        train_set_for_data_obj, valid_set_for_data_obj = split_validation(train_data_loaded, opt.valid_portion)
-        test_data_for_data_obj = valid_set_for_data_obj
-        # test_data_loaded_full در حالت validation همان valid_set است برای محاسبه n_node
-        test_data_loaded_full = valid_set_for_data_obj
-        print(f"Number of training samples after split: {len(train_set_for_data_obj[0])}")
-        print(f"Number of validation samples: {len(test_data_for_data_obj[0])}")
-    else:
-        print(f"Loading testing data from: {test_data_file}")
-        try:
-            with open(test_data_file, 'rb') as f:
-                test_data_loaded_full = pickle.load(f) # ابتدا داده کامل تست بارگذاری می‌شود
-            test_data_for_data_obj = test_data_loaded_full # کپی برای کار و محدودسازی
-            if not (isinstance(test_data_for_data_obj, tuple) and len(test_data_for_data_obj) == 2 and
-                    isinstance(test_data_for_data_obj[0], list) and isinstance(test_data_for_data_obj[1], list)):
-                print(f"Error: Test data at {test_data_file} is not in the expected format (list_of_sessions, list_of_targets).")
-                test_data_for_data_obj = ([], []) # استفاده از داده تست خالی
-                test_data_loaded_full = ([], [])
-            
-            # --- محدود کردن داده تست بر اساس data_subset_ratio ---
-            if 0 < opt.data_subset_ratio < 1.0:
-                test_sessions, test_targets = test_data_for_data_obj # استفاده از داده کپی شده
-                num_original_test_samples = len(test_sessions)
-                if num_original_test_samples > 0:
-                    num_test_samples_to_keep = int(num_original_test_samples * opt.data_subset_ratio)
-                    if num_test_samples_to_keep == 0:
-                        num_test_samples_to_keep = 1
-                    test_data_for_data_obj = (test_sessions[:num_test_samples_to_keep], test_targets[:num_test_samples_to_keep])
-                    print(f"--- Limiting testing data to {len(test_data_for_data_obj[0])} samples ({opt.data_subset_ratio*100:.1f}%) for testing. ---")
-                elif num_original_test_samples == 0:
-                     print("--- Test data is empty, no subsetting performed. ---")
-            # ---------------------------------------------------------
-
-        except FileNotFoundError:
-            print(f"Error: Testing data file not found at {test_data_file}. Proceeding with empty test set.")
-            test_data_for_data_obj = ([], [])
-            test_data_loaded_full = ([], [])
-        except Exception as e:
-            print(f"Error loading or processing testing data: {e}. Proceeding with empty test set.")
-            test_data_for_data_obj = ([], [])
-            test_data_loaded_full = ([], [])
-        print(f"Number of testing samples to be used: {len(test_data_for_data_obj[0])}")
-
-    # --- محاسبه n_node بر اساس داده‌های کامل اولیه ---
-    # این کار تضمین می‌کند n_node صحیح است حتی اگر داده‌ها برای آموزش/تست محدود شده باشند
-    if opt.dataset == 'diginetica':
-        n_node = 43098
-    elif opt.dataset == 'yoochoose1_64' or opt.dataset == 'yoochoose1_4':
-        n_node = 37484
-    else:
-        all_nodes = set()
-        # استفاده از train_data_loaded_full برای n_node
-        if train_data_loaded_full and train_data_loaded_full[0]:
-            for session in train_data_loaded_full[0]:
-                for item_wrapper in session:
-                    item = item_wrapper[0] if isinstance(item_wrapper, list) and item_wrapper else item_wrapper
-                    if isinstance(item, int) and item != 0: all_nodes.add(item)
-            for target_wrapper in train_data_loaded_full[1]:
-                target = target_wrapper[0] if isinstance(target_wrapper, list) and target_wrapper else target_wrapper
-                if isinstance(target, int) and target != 0: all_nodes.add(target)
-
-        # استفاده از test_data_loaded_full برای n_node (اگر validation نباشد)
-        if not opt.validation and test_data_loaded_full and test_data_loaded_full[0]:
-            for session in test_data_loaded_full[0]:
-                for item_wrapper in session:
-                    item = item_wrapper[0] if isinstance(item_wrapper, list) and item_wrapper else item_wrapper
-                    if isinstance(item, int) and item != 0: all_nodes.add(item)
-            for target_wrapper in test_data_loaded_full[1]:
-                target = target_wrapper[0] if isinstance(target_wrapper, list) and target_wrapper else target_wrapper
-                if isinstance(target, int) and target != 0: all_nodes.add(target)
-        # اگر opt.validation بود، test_data_loaded_full قبلاً با valid_set مقداردهی شده
-        # که خود بخشی از train_data_loaded_full است، پس آیتم‌های آن در all_nodes لحاظ شده‌اند.
-
-        if not all_nodes:
-             print("Critical Error: No nodes found in the full dataset. Cannot determine n_node.")
-             return
-        else:
-             n_node = max(all_nodes) + 1
-        print(f"Calculated n_node based on FULL dataset: {n_node}")
-
-    if n_node <= 1:
-        print(f"Error: Invalid n_node calculated: {n_node}. Must be > 1.")
-        return
-
-    # --- ساخت آبجکت‌های Data با داده‌های نهایی (احتمالاً محدود شده) ---
-    train_data_obj = None
-    test_data_obj_for_eval = None # برای ارزیابی
-
-    try:
-        if train_set_for_data_obj[0]: # فقط اگر داده آموزشی وجود دارد
-            train_data_obj = Data(train_set_for_data_obj, shuffle=True)
-            print(f"Training Data object created successfully with {len(train_data_obj.inputs)} samples.")
-        else:
-            print("Training data is empty. Training Data object not created.")
-    except ValueError as e:
-        print(f"Error creating Training Data object: {e}")
-        return
-
-    try:
-        if test_data_for_data_obj[0]: # فقط اگر داده تست/اعتبارسنجی وجود دارد
-            test_data_obj_for_eval = Data(test_data_for_data_obj, shuffle=False)
-            print(f"Test/Validation Data object created successfully with {len(test_data_obj_for_eval.inputs)} samples.")
-        else:
-            print("Test/Validation data is empty. Test/Validation Data object not created.")
-    except ValueError as e:
-        print(f"Error creating Test/Validation Data object: {e}")
-        return
-    # -------------------------------------------------------------
-
-    model = SessionGraph(opt, n_node)
-    model.to(device)
-
-    checkpoint_dir = f'./checkpoints/{opt.dataset}/'
-    if not os.path.exists(checkpoint_dir):
-        os.makedirs(checkpoint_dir)
-        print(f"Created checkpoint directory: {checkpoint_dir}")
-
-    start = time.time()
-    best_result = [0, 0, 0]
-    best_epoch = [0, 0, 0]
-    bad_counter = 0
-
-    for epoch_num in range(opt.epoch):
-        print(f"{'-'*25} Epoch: {epoch_num} {'-'*25}")
-
-        if train_data_obj is None or train_data_obj.length == 0:
-            print(f"Epoch {epoch_num}: No training data. Skipping epoch.")
-            # اگر داده آموزشی نباشد، ادامه آموزش معنی ندارد
-            if epoch_num == 0 : # اگر از ابتدا داده آموزشی نباشد، متوقف شو
-                 print("Exiting: No training data available from the start.")
-                 return
-            continue # اگر در اپوک‌های بعدی داده آموزشی از بین رفته (نباید اتفاق بیفتد)
-
-        # اجرای آموزش و تست
-        # اگر test_data_obj_for_eval خالی باشد، train_test باید بتواند این حالت را مدیریت کند
-        # یا باید اینجا از اجرای آن صرف نظر کرد.
-        # فرض می‌کنیم train_test می‌تواند با test_data خالی اجرا شود و فقط بخش آموزش را انجام دهد
-        # یا نتایج ارزیابی را صفر برگرداند. (این باید در model.py بررسی شود)
-        if test_data_obj_for_eval is None or test_data_obj_for_eval.length == 0:
-            print(f"Epoch {epoch_num}: No test/validation data for evaluation. Metrics will be 0 or based on dummy evaluation if any.")
-            # اگر train_test نیاز به test_data دارد، باید اینجا یک dummy test_data ایجاد کرد یا train_test را تغییر داد
-            # برای سادگی، یک test_data_obj خالی (اما معتبر) می‌سازیم اگر وجود ندارد
-            dummy_test_data_obj = Data(([],[]), shuffle=False) if test_data_obj_for_eval is None else test_data_obj_for_eval
-            recall, mrr, precision = train_test(model, train_data_obj, dummy_test_data_obj, opt)
-            if test_data_obj_for_eval is None or test_data_obj_for_eval.length == 0:
-                recall, mrr, precision = 0.0, 0.0, 0.0 # بازنویسی نتایج اگر واقعا داده تست نبود
-        else:
-            recall, mrr, precision = train_test(model, train_data_obj, test_data_obj_for_eval, opt)
+            # فقط برای نمونه‌هایی که هدف معتبر دارند loss را محاسبه می‌کنیم
+            # این یعنی scores هم باید برای همان نمونه‌ها فیلتر شود
+            if scores[valid_targets_mask].shape[0] > 0 :
+                 target_for_loss = (targets[valid_targets_mask] - 1).clamp(0, opt.n_node - 2) # -1 برای 0-پایه، -1 دیگر برای حذف پدینگ از n_node
+                 rec_loss_batch = model.loss_function(scores[valid_targets_mask], target_for_loss)
+            else: # اگر scores[valid_targets_mask] خالی شد (نباید اتفاق بیفتد اگر valid_targets_mask.sum() > 0)
+                 rec_loss_batch = torch.tensor(0.0, device=device)
 
 
-        flag = 0
-        # فقط اگر داده تست/اعتبارسنجی وجود داشت، نتایج را آپدیت کن و early stopping را بررسی کن
-        if test_data_obj_for_eval and test_data_obj_for_eval.length > 0:
-            if recall >= best_result[0]:
-                best_result[0] = recall
-                best_epoch[0] = epoch_num
-                flag = 1
-            if mrr >= best_result[1]:
-                best_result[1] = mrr
-                best_epoch[1] = epoch_num
-                flag = 1
-            if precision >= best_result[2]:
-                best_result[2] = precision
-                best_epoch[2] = epoch_num
-                flag = 1
-            print('Current Best Result (on available evaluation data):')
-            print(f'\tRecall@20: {best_result[0]:.4f}\tMRR@20: {best_result[1]:.4f}\tPrecision@20: {best_result[2]:.4f}\tEpochs: ({best_epoch[0]}, {best_epoch[1]}, {best_epoch[2]})')
-            bad_counter += (1 - flag)
-            if bad_counter >= opt.patience:
-                print(f"Early stopping triggered after {opt.patience} epochs without improvement.")
-                break
-        else: # اگر داده ارزیابی نبود، فقط نتایج اپوک فعلی (که صفر خواهد بود) را چاپ کن
-            print(f'Epoch {epoch_num} completed (no evaluation data). Recall: {recall:.4f}, MRR: {mrr:.4f}, Precision: {precision:.4f}')
+        # loss نهایی
+        loss_batch = rec_loss_batch + ssl_loss # ssl_loss از قبل با وزن ضرب شده (اگر ssl_weight > 0)
 
+        loss_batch.backward()
+        optimizer.step()
 
-        model_save_path = os.path.join(checkpoint_dir, f'model_epoch_{epoch_num}.pth')
-        torch.save({
-            'epoch': epoch_num,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': model.optimizer.state_dict(),
-            'scheduler_state_dict': model.scheduler.state_dict(),
-            'best_result': best_result,
-            'opt': opt
-        }, model_save_path)
-        print(f'Model checkpoint saved to {model_save_path}')
+        total_loss_epoch += loss_batch.item()
+        total_rec_loss_epoch += rec_loss_batch.item()
+        total_ssl_loss_epoch += ssl_loss.item() # ssl_loss از مدل با وزن می‌آید
+        num_batches_train += 1
 
+    avg_total_loss = total_loss_epoch / num_batches_train if num_batches_train > 0 else 0
+    avg_rec_loss = total_rec_loss_epoch / num_batches_train if num_batches_train > 0 else 0
+    avg_ssl_loss = total_ssl_loss_epoch / num_batches_train if num_batches_train > 0 else 0
 
-    print(f"{'-'*25} Training Finished {'-'*25}")
-    end = time.time()
-    print(f"Total Run time: {end - start:.2f} s")
-    if test_data_obj_for_eval and test_data_obj_for_eval.length > 0:
-        print("Final Best Overall Result (on available evaluation data):")
-        print(f'\tRecall@20: {best_result[0]:.4f}\tMRR@20: {best_result[1]:.4f}\tPrecision@20: {best_result[2]:.4f}\tAchieved at Epochs: ({best_epoch[0]}, {best_epoch[1]}, {best_epoch[2]})')
-    else:
-        print("Training finished (no evaluation data was available to determine best results).")
+    # ارزیابی مدل
+    model.eval()
+    all_hits_eval = []
+    all_mrrs_eval = []
+    all_precisions_eval = [] # برای Precision@k
+    k_metric = 20
 
-if __name__ == '__main__':
-    main()
+    with torch.no_grad():
+        for pyg_batch, original_sequences_padded, attention_masks, targets in test_loader:
+            if pyg_batch.x is None or pyg_batch.x.numel() == 0:
+                # print("Skipping empty batch in testing.")
+                continue
+
+            pyg_batch = pyg_batch.to(device)
+            original_sequences_padded = original_sequences_padded.to(device)
+            attention_masks = attention_masks.to(device)
+            targets = targets.to(device).squeeze() # (B)
+
+            scores = model(pyg_batch, original_sequences_padded, attention_masks, is_train=False) # (B, n_node-1)
+
+            # گرفتن k آیتم برتر
+            # scores مربوط به آیتم‌های 1 تا n_node-1 است (اندیس 0 تا n_node-2)
+            _, top_k_indices_from_scores = scores.topk(k_metric, dim=1) # (B, k) این اندیس‌ها 0-پایه هستند نسبت به scores
+
+            # تبدیل اندیس‌های top_k به IDهای اصلی آیتم (1 تا n_node-1)
+            top_k_item_ids = top_k_indices_from_scores + 1 # چون scores برای آیتم‌های 1-پایه است که 0-پایه شده‌اند
+
+            targets_cpu = targets.cpu().numpy()
+            top_k_item_ids_cpu = top_k_item_ids.cpu().numpy()
+
+            for i in range(targets_cpu.shape[0]):
+                target_id = targets_cpu[i]
+                predicted_ids = top_k_item_ids_cpu[i]
+
+                if target_id == 0: # نادیده گرفتن اهداف پدینگ (اگر وجود داشته باشند)
+                    continue
+
+                is_hit = target_id in predicted_ids
+                all_hits_eval.append(1 if is_hit else 0)
+
+                if is_hit:
+                    rank_list = np.where(predicted_ids == target_id)[0]
+                    rank = rank_list[0] + 1
+                    all_mrrs_eval.append(1.0 / rank)
+                    all_precisions_eval.append(1.0 / k_metric)
+                else:
+                    all_mrrs_eval.append(0.0)
+                    all_precisions_eval.append(0.0)
+
+    recall_at_20_epoch = np.mean(all_hits_eval) * 100 if all_hits_eval else 0
+    mrr_at_20_epoch = np.mean(all_mrrs_eval) * 100 if all_mrrs_eval else 0
+    precision_at_20_epoch = np.mean(all_precisions_eval) * 100 if all_precisions_eval else 0 # محاسبه صحیح Precision
+
+    print(f"Epoch {epoch+1}/{opt.epoch} | Avg Loss: {avg_total_loss:.4f} (Rec: {avg_rec_loss:.4f}, SSL: {avg_ssl_loss:.4f})")
+    print(f"Eval: Recall@{k_metric}: {recall_at_20_epoch:.2f}% | MRR@{k_metric}: {mrr_at_20_epoch:.2f}% | Precision@{k_metric}: {precision_at_20_epoch:.2f}%")
+
+    if recall_at_20_epoch > best_recall_at_20:
+        best_recall_at_20 = recall_at_20_epoch
+        save_path = os.path.join(checkpoint_dir, f"model_best.pth") # ذخیره بهترین مدل
+        torch.save(model.state_dict(), save_path)
+        print(f"✅ Best Model saved to {save_path} (Recall@{k_metric}: {best_recall_at_20:.2f}%)")
+
+    # ذخیره مدل هر اپوک (اختیاری)
+    # save_path_epoch = os.path.join(checkpoint_dir, f"model_epoch_{epoch+1}.pth")
+    # torch.save(model.state_dict(), save_path_epoch)
+    # print(f"Model of epoch {epoch+1} saved to {save_path_epoch}")
+
+print("Training finished.")
