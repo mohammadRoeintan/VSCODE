@@ -1,9 +1,11 @@
 import argparse
 import pickle
 import time
-import os # ماژول os برای کار با مسیرها و دایرکتوری‌ها اضافه شده است
+import os
 from utils import Data, split_validation
-from model import SessionGraph, trans_to_cuda, train_test
+# model.py شامل SessionGraph, train_test است. trans_to_cuda دیگر مستقیماً از اینجا ایمپورت نمی‌شود
+# چون انتقال به دستگاه در خود model.py یا با .to(device) انجام می‌شود.
+from model import SessionGraph, train_test
 import torch
 import numpy as np
 
@@ -36,25 +38,28 @@ parser.add_argument('--dropout', type=float, default=0.1, help='dropout rate in 
 opt = parser.parse_args()
 print(opt)
 
-# بررسی CUDA بودن دستگاه
+# تعیین دستگاه به صورت گلوبال‌تر یا پاس دادن آن به توابع
+# این device در model.py (مثلاً در تابع forward سراسری) استفاده خواهد شد.
+# اگر مدل و داده‌ها مستقیماً روی این device ایجاد شوند، نیاز به trans_to_cuda کمتر می‌شود.
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Using device: {device}")
 
 
 def main():
-    # مسیر دیتاست‌ها
     base_dataset_path = './datasets/'
 
     if opt.dataset == 'sample':
-        train_data_file = base_dataset_path + 'train.txt'
-        test_data_file = base_dataset_path + 'test.txt'
+        train_data_file = os.path.join(base_dataset_path, 'train.txt')
+        test_data_file = os.path.join(base_dataset_path, 'test.txt')
     else:
-        train_data_file = base_dataset_path + opt.dataset + '/train.txt'
-        test_data_file = base_dataset_path + opt.dataset + '/test.txt'
+        train_data_file = os.path.join(base_dataset_path, opt.dataset, 'train.txt')
+        test_data_file = os.path.join(base_dataset_path, opt.dataset, 'test.txt')
 
     print(f"Loading training data from: {train_data_file}")
     try:
-        train_data_loaded = pickle.load(open(train_data_file, 'rb'))
+        # with open برای مدیریت بهتر فایل‌ها
+        with open(train_data_file, 'rb') as f:
+            train_data_loaded = pickle.load(f)
         if not (isinstance(train_data_loaded, tuple) and len(train_data_loaded) == 2):
             print(f"Error: Training data at {train_data_file} is not in the expected format (sessions, targets).")
             return
@@ -65,54 +70,58 @@ def main():
         print(f"Error loading or processing training data: {e}")
         return
 
+    test_data_obj = None # مقدار اولیه
     if opt.validation:
+        # اطمینان از اینکه train_data_loaded دارای داده است قبل از تقسیم
+        if not train_data_loaded[0] or not train_data_loaded[1]:
+            print("Error: Training data is empty, cannot perform validation split.")
+            return
         train_set, valid_set = split_validation(train_data_loaded, opt.valid_portion)
+        # test_data_loaded برای سازگاری با بخش n_node استفاده می‌شود، اگرچه test_data_obj از valid_set ساخته می‌شود
         test_data_loaded = valid_set
+        try:
+            train_data_obj = Data(train_set, shuffle=True)
+            # در حالت validation، test_data_obj همان valid_set است
+            test_data_obj = Data(valid_set, shuffle=False)
+            print("Training and Validation Data objects created successfully.")
+        except ValueError as e:
+            print(f"Error creating Data objects for validation: {e}")
+            return
     else:
         print(f"Loading testing data from: {test_data_file}")
         try:
-            test_data_loaded = pickle.load(open(test_data_file, 'rb'))
+            with open(test_data_file, 'rb') as f:
+                test_data_loaded = pickle.load(f)
             if not (isinstance(test_data_loaded, tuple) and len(test_data_loaded) == 2):
                 print(f"Error: Test data at {test_data_file} is not in the expected format (sessions, targets).")
                 return
         except FileNotFoundError:
-            print(f"Error: Testing data file not found at {test_data_file}")
-            if not opt.validation:
-                 print("Error: Test data not found and validation is not enabled.")
-                 return
-            test_data_loaded = ([], [])
+            print(f"Error: Testing data file not found at {test_data_file}. Proceeding without test data for n_node calculation if necessary.")
+            test_data_loaded = ([], []) # اجازه ادامه برای محاسبه n_node فقط با داده ترین
         except Exception as e:
-             print(f"Error loading or processing testing data: {e}")
-             return
+            print(f"Error loading or processing testing data: {e}")
+            return
+        try:
+            train_data_obj = Data(train_data_loaded, shuffle=True)
+            print("Training Data object created successfully.")
+            if test_data_loaded[0] and test_data_loaded[1]: # فقط اگر داده تست معتبر بارگذاری شده باشد
+                 test_data_obj = Data(test_data_loaded, shuffle=False)
+                 print("Testing Data object created successfully.")
+            else:
+                 print("Warning: Test data is empty or was not found. Evaluation will not be performed unless in validation mode.")
+        except ValueError as e:
+            print(f"Error creating Data objects: {e}")
+            return
 
-    try:
-        train_data_obj = Data(train_set if opt.validation else train_data_loaded, shuffle=True)
-        print("Training Data object created successfully.")
-    except ValueError as e:
-        print(f"Error creating Training Data object: {e}")
-        data_to_show = train_set if opt.validation else train_data_loaded
-        if isinstance(data_to_show, tuple) and len(data_to_show) == 2:
-            print("Sample session (train):", data_to_show[0][0] if data_to_show[0] else "None")
-            print("Sample target (train):", data_to_show[1][0] if data_to_show[1] else "None")
-        return
-
-    try:
-        test_data_obj = Data(test_data_loaded, shuffle=False)
-        print("Testing Data object created successfully.")
-    except ValueError as e:
-        print(f"Error creating Testing Data object: {e}")
-        if isinstance(test_data_loaded, tuple) and len(test_data_loaded) == 2:
-             print("Sample session (test):", test_data_loaded[0][0] if test_data_loaded[0] else "None")
-             print("Sample target (test):", test_data_loaded[1][0] if test_data_loaded[1] else "None")
-        return
-
+    # محاسبه n_node
+    # این بخش تغییر زیادی نکرده چون سربار آن یکبار در ابتدا است و معمولاً گلوگاه نیست.
     if opt.dataset == 'diginetica':
         n_node = 43098
     elif opt.dataset == 'yoochoose1_64' or opt.dataset == 'yoochoose1_4':
         n_node = 37484
     else:
         all_nodes = set()
-        if train_data_loaded and isinstance(train_data_loaded[0], list):
+        if train_data_loaded and train_data_loaded[0]: # بررسی اینکه لیست جلسات خالی نباشد
             for session in train_data_loaded[0]:
                 for item_wrapper in session:
                     item = item_wrapper[0] if isinstance(item_wrapper, list) and item_wrapper else item_wrapper
@@ -121,7 +130,7 @@ def main():
                 target = target_wrapper[0] if isinstance(target_wrapper, list) and target_wrapper else target_wrapper
                 if isinstance(target, int) and target != 0: all_nodes.add(target)
 
-        if test_data_loaded and isinstance(test_data_loaded[0], list):
+        if test_data_loaded and test_data_loaded[0]: # بررسی اینکه لیست جلسات تست خالی نباشد
             for session in test_data_loaded[0]:
                 for item_wrapper in session:
                     item = item_wrapper[0] if isinstance(item_wrapper, list) and item_wrapper else item_wrapper
@@ -131,33 +140,64 @@ def main():
                 if isinstance(target, int) and target != 0: all_nodes.add(target)
 
         if not all_nodes:
-             print("Warning: No nodes found in the dataset. Setting n_node to a default for 'sample'.")
-             n_node = 310 if opt.dataset == 'sample' else 1000
+             print("Critical Warning: No nodes found in the dataset. Cannot determine n_node.")
+             # بهتر است در این حالت برنامه متوقف شود یا n_node از طریق پارامتر ورودی گرفته شود
+             # n_node = 310 if opt.dataset == 'sample' else 1000 # این مقدار پیش‌فرض ریسک بالایی دارد
+             return # یا raise ValueError("No nodes found to determine n_node")
         else:
              n_node = max(all_nodes) + 1
         print(f"Calculated n_node based on actual data: {n_node}")
 
-    if n_node <= 1:
-        print(f"Error: Invalid n_node calculated: {n_node}. Check dataset processing.")
+    if n_node <= 1: # پدینگ 0 و حداقل یک آیتم
+        print(f"Error: Invalid n_node calculated: {n_node}. Must be > 1.")
         return
 
     model = SessionGraph(opt, n_node)
-    model = trans_to_cuda(model)
+    model.to(device) # انتقال مدل به دستگاه (GPU یا CPU)
 
-    # --- ایجاد پوشه برای ذخیره مدل‌ها ---
     checkpoint_dir = f'./checkpoints/{opt.dataset}/'
     if not os.path.exists(checkpoint_dir):
         os.makedirs(checkpoint_dir)
         print(f"Created checkpoint directory: {checkpoint_dir}")
-    # ------------------------------------
 
     start = time.time()
-    best_result = [0, 0, 0]
-    best_epoch = [0, 0, 0]
+    best_result = [0, 0, 0]  # [recall, mrr, precision]
+    best_epoch = [0, 0, 0]   # [epoch_for_best_recall, epoch_for_best_mrr, epoch_for_best_precision]
     bad_counter = 0
+
+    # بررسی اینکه آیا داده تست/اعتبارسنجی برای ارزیابی وجود دارد
+    if test_data_obj is None or test_data_obj.length == 0:
+        print("Warning: No test/validation data available. Skipping evaluation loop and early stopping.")
+        # اگر فقط آموزش مد نظر است، می‌توان حلقه را فقط برای آموزش اجرا کرد
+        # یا برنامه را متوقف کرد. در اینجا فقط هشدار می‌دهیم.
+        # برای سادگی، اگر داده تست نباشد، از ادامه حلقه اصلی جلوگیری می‌کنیم.
+        # اگر می‌خواهید آموزش بدون ارزیابی انجام شود، این بخش را باید تغییر دهید.
+        if not opt.validation: # اگر حالت اعتبارسنجی هم نبود، واقعا داده تست نداریم
+            print("Exiting because no evaluation data is present and not in validation mode.")
+            return
+
 
     for epoch_num in range(opt.epoch):
         print(f"{'-'*25} Epoch: {epoch_num} {'-'*25}")
+        
+        # اطمینان از اینکه train_data_obj و test_data_obj معتبر هستند
+        if train_data_obj is None or train_data_obj.length == 0:
+            print(f"Epoch {epoch_num}: No training data. Skipping epoch.")
+            continue
+        if test_data_obj is None or test_data_obj.length == 0:
+             # این حالت نباید رخ دهد اگر بررسی اولیه انجام شده باشد
+            print(f"Epoch {epoch_num}: No test/validation data. Skipping evaluation for this epoch.")
+            # در این حالت، فقط آموزش می‌دهیم (اگر منطق train_test این را پشتیبانی کند)
+            # یا اگر ارزیابی الزامی است، باید خطا داد یا از اپوک صرف نظر کرد.
+            # فعلا فرض می‌کنیم train_test می‌تواند بدون داده تست اجرا شود و فقط آموزش دهد (باید در model.py بررسی شود)
+            # اما برای جلوگیری از خطا، از فراخوانی train_test صرف نظر می‌کنیم اگر test_data_obj نباشد.
+            # TODO: منطق train_test را بررسی کنید که آیا می‌تواند فقط آموزش دهد یا خیر.
+            # برای سادگی فعلی، اگر test_data_obj نیست، از اپوک رد می‌شویم.
+            continue
+
+
+        # پاس دادن device به train_test می‌تواند مفید باشد اگر نیاز به ایجاد تنسور جدید روی دستگاه خاصی باشد
+        # اما در پیاده‌سازی فعلی model.py، دستگاه از خود مدل یا ورودی‌ها گرفته می‌شود.
         recall, mrr, precision = train_test(model, train_data_obj, test_data_obj, opt)
 
         flag = 0
@@ -177,11 +217,17 @@ def main():
         print('Current Best Result:')
         print(f'\tRecall@20: {best_result[0]:.4f}\tMRR@20: {best_result[1]:.4f}\tPrecision@20: {best_result[2]:.4f}\tEpochs: ({best_epoch[0]}, {best_epoch[1]}, {best_epoch[2]})')
 
-        # --- ذخیره مدل بعد از هر اپوک ---
         model_save_path = os.path.join(checkpoint_dir, f'model_epoch_{epoch_num}.pth')
-        torch.save(model.state_dict(), model_save_path)
-        print(f'Model saved to {model_save_path}')
-        # ---------------------------------
+        # ذخیره state_dict مدل که شامل پارامترها است
+        torch.save({
+            'epoch': epoch_num,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': model.optimizer.state_dict(), # برای امکان ادامه آموزش
+            'scheduler_state_dict': model.scheduler.state_dict(), # برای امکان ادامه آموزش
+            'best_result': best_result, # ذخیره نتایج برای اطلاع
+            'opt': opt # ذخیره پارامترهای استفاده شده
+        }, model_save_path)
+        print(f'Model checkpoint saved to {model_save_path}')
 
         bad_counter += (1 - flag)
         if bad_counter >= opt.patience:
@@ -196,4 +242,15 @@ def main():
 
 
 if __name__ == '__main__':
+    # تنظیم torch برای عدم استفاده از حافظه پنهان CUDA در برخی موارد (می‌تواند به جلوگیری از خطاهای حافظه کمک کند)
+    # os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True' # در صورت نیاز
+    
+    # برای اطمینان از تکرارپذیری (اگرچه shuffle در Data وجود دارد)
+    # torch.manual_seed(0)
+    # np.random.seed(0)
+    # if torch.cuda.is_available():
+    # torch.cuda.manual_seed_all(0)
+    # torch.backends.cudnn.deterministic = True
+    # torch.backends.cudnn.benchmark = False
+
     main()
