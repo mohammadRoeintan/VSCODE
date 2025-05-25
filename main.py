@@ -207,7 +207,7 @@ def main():
     model = SessionGraph(opt, n_node)
     model.to(device)
 
-    checkpoint_dir = f'/checkpoints/{opt.dataset}/'
+    checkpoint_dir = f'./checkpoints/{opt.dataset}/'
     if not os.path.exists(checkpoint_dir):
         os.makedirs(checkpoint_dir)
         print(f"Created checkpoint directory: {checkpoint_dir}")
