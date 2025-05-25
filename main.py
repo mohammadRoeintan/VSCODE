@@ -1,7 +1,7 @@
 import torch
 from torch.optim import Adam
-from model_pyg_final_attempt import SessionGraph # نام فایل مدل جدید
-from utils_pyg_final_attempt import generate_dataloader_pyg_final # نام فایل utils جدید
+from model import SessionGraph # نام فایل مدل جدید
+from utils import generate_dataloader_pyg_final # نام فایل utils جدید
 import numpy as np
 import os
 import pickle
