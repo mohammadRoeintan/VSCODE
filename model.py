@@ -343,7 +343,7 @@ def train_test(model, train_data, test_data, opt): # opt به عنوان آرگ�
     # گرفتن زمان شروع آموزش به وقت ایران
     now_utc_train_start = datetime.datetime.now(datetime.timezone.utc)
     now_ir_train_start = now_utc_train_start.astimezone(IR_TIMEZONE)
-    print(f'start training: {now_ir_train_start.strftime("%Y-%m-%d %H:%M:%S %Z (%z)")}')
+    print(f'start training: {now_ir_train_start.strftime("%Y-%m-%d %H:%M:%S ")}')
 
     model.train()
     total_loss = 0.0
@@ -406,7 +406,7 @@ def train_test(model, train_data, test_data, opt): # opt به عنوان آرگ�
     # گرفتن زمان شروع پیش‌بینی به وقت ایران
     now_utc_predict_start = datetime.datetime.now(datetime.timezone.utc)
     now_ir_predict_start = now_utc_predict_start.astimezone(IR_TIMEZONE)
-    print(f'start predicting: {now_ir_predict_start.strftime("%Y-%m-%d %H:%M:%S %Z (%z)")}')
+    print(f'start predicting: {now_ir_predict_start.strftime("%Y-%m-%d %H:%M:%S ")}')
 
     model.eval()
     hit, mrr, precision = [], [], []
