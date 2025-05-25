@@ -5,7 +5,7 @@ import torch
 from torch import nn
 from torch.nn import Module, Parameter
 import torch.nn.functional as F
-import copy
+import copy # برای deepcopy در TargetAwareTransformerEncoder
 from torch.cuda.amp import autocast, GradScaler
 
 # -------------- 1. کلاس PositionalEncoding --------------
@@ -30,7 +30,7 @@ class PositionalEncoding(Module):
         else:
             seq_len_dim_index = -1
             if x.dim() == 3:
-                if x.size(1) <= self.pe.size(0):
+                if x.size(1) <= self.pe.size(0): # اولویت با batch_first=True
                     seq_len_dim_index = 1
                 elif x.size(0) <= self.pe.size(0):
                     seq_len_dim_index = 0
@@ -45,6 +45,7 @@ class PositionalEncoding(Module):
                 try:
                     x = x + pe_to_add
                 except RuntimeError:
+                    # در صورت عدم تطابق ابعاد، از اضافه کردن صرف نظر می‌شود
                     pass
         return self.dropout(x)
 
@@ -66,9 +67,7 @@ class GNN(Module):
         self.linear_edge_out = nn.Linear(self.hidden_size, self.hidden_size, bias=True)
 
     def GNNCell(self, A, hidden): # A و hidden باید روی دستگاه باشند
-        # دستگاه از hidden گرفته می‌شود، A نیز باید روی همان دستگاه باشد
-        # A = A.to(hidden.device) # این خط اگر A از قبل روی دستگاه باشد، اضافی است
-
+        # A باید از قبل روی دستگاه صحیح باشد (در تابع forward انجام می‌شود)
         if torch.isnan(A).any() or torch.isinf(A).any(): A = torch.nan_to_num(A)
         if torch.isnan(hidden).any() or torch.isinf(hidden).any(): hidden = torch.nan_to_num(hidden)
 
@@ -121,7 +120,7 @@ class TargetAwareEncoderLayer(Module):
         sa_output, _ = self.self_attn(src_enhanced, src_enhanced, src_enhanced,
                                       key_padding_mask=src_key_padding_mask,
                                       attn_mask=src_mask)
-        out1 = src + self.dropout1(sa_output)
+        out1 = src + self.dropout1(sa_output) # اتصال باقیمانده با src اصلی
         out1 = self.norm1(out1)
         ff_output = self.linear2(self.dropout(self.activation(self.linear1(out1))))
         out2 = out1 + self.dropout2(ff_output)
@@ -150,7 +149,7 @@ class SessionGraph(Module):
         super(SessionGraph, self).__init__()
         self.hidden_size = opt.hiddenSize
         self.n_node = n_node
-        # self.batch_size = opt.batchSize # این پارامتر مستقیماً استفاده نشده است
+        # self.batch_size = opt.batchSize # این ویژگی دیگر مستقیماً در تابع train_test استفاده نمی‌شود
         self.nonhybrid = opt.nonhybrid
         self.embedding = nn.Embedding(self.n_node, self.hidden_size, padding_idx=0)
         self.gnn = GNN(self.hidden_size, step=opt.step)
@@ -207,7 +206,7 @@ class SessionGraph(Module):
         q2 = self.linear_two(hidden_transformer_output)
         mask_expanded_alpha = mask.unsqueeze(-1).float()
         alpha_logits = self.linear_three(torch.sigmoid(q1 + q2))
-        if hidden_transformer_output.size(1) == 0 and mask_expanded_alpha.size(1) > 0 :
+        if hidden_transformer_output.size(1) == 0 and mask_expanded_alpha.size(1) > 0 : # حالت خاص اگر توالی ورودی خالی باشد
              alpha_logits_masked = alpha_logits
         else:
             alpha_logits_masked = alpha_logits.masked_fill(mask_expanded_alpha == 0, -float('inf'))
@@ -215,9 +214,9 @@ class SessionGraph(Module):
 
         if alpha.size(1) == hidden_transformer_output.size(1) and hidden_transformer_output.size(1) > 0:
              a = torch.sum(alpha * hidden_transformer_output * mask_expanded_alpha, 1)
-        elif hidden_transformer_output.size(1) == 0 :
+        elif hidden_transformer_output.size(1) == 0 : # اگر توالی ورودی خالی باشد
              a = torch.zeros(batch_size, self.hidden_size, device=device)
-        else:
+        else: # حالت عدم تطابق ابعاد (نباید رخ دهد)
             a = torch.zeros(batch_size, self.hidden_size, device=device)
 
         candidate_embeds = self.embedding.weight[1:] # از قبل روی دستگاه مدل است
@@ -230,16 +229,16 @@ class SessionGraph(Module):
             if hidden_transformer_output.size(1) > 0:
                  hidden_masked_for_qt = hidden_transformer_output * mask_expanded_beta
                  qt = self.linear_t(hidden_masked_for_qt)
-            else:
-                 qt = torch.zeros_like(hidden_transformer_output, device=device) # اطمینان از device
+            else: # اگر توالی ورودی خالی باشد
+                 qt = torch.zeros_like(hidden_transformer_output, device=device)
 
-            if qt.size(1) > 0:
+            if qt.size(1) > 0: # اگر qt (و در نتیجه hidden_transformer_output) آیتم داشته باشد
                  beta_logits = torch.matmul(candidate_embeds, qt.transpose(1, 2))
                  beta_mask = mask.unsqueeze(1)
                  beta_logits_masked = beta_logits.masked_fill(beta_mask == 0, -float('inf'))
                  beta = F.softmax(beta_logits_masked, dim=-1)
-                 target_ctx = torch.matmul(beta, qt * mask_expanded_beta)
-            else:
+                 target_ctx = torch.matmul(beta, qt * mask_expanded_beta) # qt از قبل با ماسک ضرب شده
+            else: # اگر qt خالی باشد
                  target_ctx = torch.zeros(batch_size, candidate_embeds.size(0), self.hidden_size, device=device)
             final_representation = a.unsqueeze(1) + target_ctx
             scores = torch.sum(final_representation * candidate_embeds.unsqueeze(0), dim=-1)
@@ -257,41 +256,31 @@ class SessionGraph(Module):
         ssl_loss = (loss_12.mean() + loss_21.mean()) / 2.0
         return ssl_loss
 
-# توابع trans_to_cuda و trans_to_cpu بدون تغییر باقی می‌مانند
-# زیرا در تابع forward جدید، انتقال به دستگاه به روش دیگری انجام می‌شود.
-# اما برای سازگاری با main.py (اگر جای دیگری استفاده شده) می‌توانند باقی بمانند.
-def trans_to_cuda(variable):
-    if torch.cuda.is_available():
-        return variable.cuda()
-    else:
-        return variable
-
-def trans_to_cpu(variable):
-    if torch.cuda.is_available():
-        return variable.cpu()
-    else:
-        return variable
-
-# -------------- تابع forward کلی (با بهینه‌سازی انتقال داده) --------------
+# -------------- تابع forward کلی (اصلاح شده برای انتقال بهینه داده) --------------
 def forward(model, i, data, is_train=True):
+    # data.get_slice() آرایه‌های NumPy برمی‌گرداند
     alias_inputs_np, A_np, items_np, mask_np, targets_np = data.get_slice(i)
 
     # دستگاه هدف از مدل گرفته می‌شود (مدل باید از قبل به GPU منتقل شده باشد)
     target_device = next(model.parameters()).device
 
     # تبدیل آرایه‌های NumPy به تنسورهای PyTorch و انتقال مستقیم به دستگاه هدف
-    # non_blocking=True می‌تواند برای انتقال‌های ناهمزمان مفید باشد (نیاز به حافظه پین شده CPU دارد)
-    alias_inputs = torch.from_numpy(alias_inputs_np).long().to(target_device, non_blocking=True if target_device.type=='cuda' else False)
-    A_gnn = torch.from_numpy(A_np).float().to(target_device, non_blocking=True if target_device.type=='cuda' else False) # A_np از قبل float32 است
-    items_gnn_input = torch.from_numpy(items_np).long().to(target_device, non_blocking=True if target_device.type=='cuda' else False)
-    mask_seq = torch.from_numpy(mask_np).long().to(target_device, non_blocking=True if target_device.type=='cuda' else False) # در اصل float32 است، اینجا به long تبدیل می‌شود
-    targets_final = torch.from_numpy(targets_np).long().to(target_device, non_blocking=True if target_device.type=='cuda' else False)
+    # non_blocking=True برای انتقال ناهمزمان در صورت استفاده از حافظه پین شده CPU مفید است
+    is_cuda_device = target_device.type == 'cuda'
+    alias_inputs = torch.from_numpy(alias_inputs_np).long().to(target_device, non_blocking=is_cuda_device)
+    A_gnn = torch.from_numpy(A_np).float().to(target_device, non_blocking=is_cuda_device)
+    items_gnn_input = torch.from_numpy(items_np).long().to(target_device, non_blocking=is_cuda_device)
+    # mask_np از utils.py به صورت float32 می‌آید، اینجا به long تبدیل می‌شود.
+    # اگر به عنوان ماسک بولی استفاده می‌شود، .bool() ممکن است مناسب‌تر باشد، اما long هم برای مقایسه با 0 کار می‌کند.
+    mask_seq = torch.from_numpy(mask_np).long().to(target_device, non_blocking=is_cuda_device)
+    targets_final = torch.from_numpy(targets_np).long().to(target_device, non_blocking=is_cuda_device)
 
+    # --- بقیه عملیات روی GPU انجام خواهد شد ---
     hidden_emb = model.embedding(items_gnn_input)
     if torch.isnan(hidden_emb).any() or torch.isinf(hidden_emb).any():
         hidden_emb = torch.nan_to_num(hidden_emb)
 
-    hidden_gnn = model.gnn(A_gnn, hidden_emb)
+    hidden_gnn = model.gnn(A_gnn, hidden_emb) # A_gnn و hidden_emb روی GPU هستند
     if torch.isnan(hidden_gnn).any() or torch.isinf(hidden_gnn).any():
         hidden_gnn = torch.nan_to_num(hidden_gnn)
 
@@ -302,8 +291,8 @@ def forward(model, i, data, is_train=True):
     seq_hidden_gnn = torch.gather(hidden_gnn, 1, alias_expanded_for_gather)
 
     seq_hidden_pos = model.pos_encoder(seq_hidden_gnn)
-    src_key_padding_mask = (mask_seq == 0) # mask_seq از قبل long است، برای مقایسه با 0 مشکلی نیست
-    candidate_embeds_global = model.embedding.weight[1:]
+    src_key_padding_mask = (mask_seq == 0)
+    candidate_embeds_global = model.embedding.weight[1:] # از قبل روی target_device است
 
     hidden_transformer_output = model.transformer_encoder(
         src=seq_hidden_pos,
@@ -313,10 +302,10 @@ def forward(model, i, data, is_train=True):
 
     scores = model.compute_scores(hidden_transformer_output, mask_seq)
 
-    ssl_loss = torch.tensor(0.0, device=scores.device)
+    ssl_loss = torch.tensor(0.0, device=scores.device) # ایجاد روی همان دستگاه scores
     if is_train and model.ssl_weight > 0:
         try:
-            sequence_lengths_ssl = torch.sum(mask_seq.float(), 1).long() # mask_seq از قبل long است، .float() برای sum لازم است
+            sequence_lengths_ssl = torch.sum(mask_seq.float(), 1).long()
             batch_indices_ssl = torch.arange(batch_size_fwd, device=alias_inputs.device)
             valid_lengths_mask_ssl = sequence_lengths_ssl > 0
             last_item_node_indices_in_gnn = torch.zeros(batch_size_fwd, dtype=torch.long, device=alias_inputs.device)
@@ -327,7 +316,7 @@ def forward(model, i, data, is_train=True):
 
             clamped_last_item_node_indices = last_item_node_indices_in_gnn.clamp(0, hidden_gnn.size(1) - 1)
             ssl_base_emb = torch.zeros(batch_size_fwd, model.hidden_size, device=hidden_gnn.device)
-            if valid_lengths_mask_ssl.any() and hidden_gnn.size(1) > 0:
+            if valid_lengths_mask_ssl.any() and hidden_gnn.size(1) > 0: # اطمینان از اینکه hidden_gnn خالی نیست
                 ssl_base_emb[valid_lengths_mask_ssl] = hidden_gnn[batch_indices_ssl[valid_lengths_mask_ssl], clamped_last_item_node_indices[valid_lengths_mask_ssl]]
 
             ssl_emb1 = F.dropout(ssl_base_emb, p=model.ssl_dropout_rate, training=True)
@@ -343,8 +332,8 @@ def forward(model, i, data, is_train=True):
     return targets_final, scores, ssl_loss
 
 
-# -------------- تابع آموزش و تست (با تغییرات جزئی برای GPU و وضوح) --------------
-def train_test(model, train_data, test_data, opt):
+# -------------- تابع آموزش و تست (اصلاح شده برای استفاده از opt.batchSize) --------------
+def train_test(model, train_data, test_data, opt): # opt به عنوان آرگومان به تابع اضافه شده است
     scaler = GradScaler(enabled=torch.cuda.is_available())
 
     print('start training: ', datetime.datetime.now())
@@ -352,29 +341,36 @@ def train_test(model, train_data, test_data, opt):
     total_loss = 0.0
     total_rec_loss = 0.0
     total_ssl_loss = 0.0
-    slices = train_data.generate_batch(model.batch_size)
+    # استفاده از opt.batchSize به جای model.batch_size برای جلوگیری از خطا
+    slices = train_data.generate_batch(opt.batchSize)
 
     for step, i_slice in enumerate(slices):
-        model.optimizer.zero_grad(set_to_none=True) # بهینه‌سازی جزئی
+        model.optimizer.zero_grad(set_to_none=True) # بهینه‌سازی جزئی برای حافظه
 
         with autocast(enabled=torch.cuda.is_available()):
+            # تابع forward داده‌ها را به دستگاه مدل منتقل می‌کند
             targets, scores, ssl_loss_val = forward(model, i_slice, train_data, is_train=True)
 
+            # targets و scores از قبل روی دستگاه صحیح هستند
             valid_targets_mask = (targets > 0) & (targets <= model.n_node)
-            rec_loss = torch.tensor(0.0, device=scores.device)
+            rec_loss = torch.tensor(0.0, device=scores.device) # ایجاد روی همان دستگاه scores
 
             if valid_targets_mask.sum() > 0:
-                 if scores.shape[1] == model.n_node - 1: # n_node-1 چون آیتم 0 (پدینگ) در امتیازات نیست
+                 # n_node-1 چون آیتم 0 (پدینگ) در امتیازات کاندیدا نیست
+                 if scores.shape[1] == model.n_node - 1:
                       try:
                            # targets از 1 شروع می‌شوند، اندیس‌ها برای loss باید از 0 باشند
                            target_values_for_loss = (targets[valid_targets_mask] - 1).clamp(0, scores.shape[1] - 1)
                            rec_loss = model.loss_function(scores[valid_targets_mask], target_values_for_loss)
                       except IndexError:
-                            pass # rec_loss صفر باقی می‌ماند
+                            # اگر خطای اندیس رخ داد (نباید اتفاق بیفتد با clamp)، rec_loss صفر باقی می‌ماند
+                            pass
             loss = rec_loss + model.ssl_weight * ssl_loss_val
             if torch.isnan(loss).any() or torch.isinf(loss).any():
-                 continue
+                 # print(f"Warning: NaN/Inf detected in total loss for training slice {step}. Skipping batch.")
+                 continue # از این بچ صرف نظر کن
 
+        # backward و step باید خارج از autocast باشند یا با scaler مدیریت شوند
         if torch.cuda.is_available():
              scaler.scale(loss).backward()
              scaler.step(model.optimizer)
@@ -383,18 +379,18 @@ def train_test(model, train_data, test_data, opt):
              loss.backward()
              model.optimizer.step()
 
-        total_loss += loss.item()
+        total_loss += loss.item() # .item() برای گرفتن مقدار عددی از تنسور تک عنصری
         total_rec_loss += rec_loss.item()
         total_ssl_loss += ssl_loss_val.item()
 
-        if (step + 1) % max(1, int(len(slices) / 5)) == 0:
+        if (step + 1) % max(1, int(len(slices) / 5)) == 0: # لاگ حدود 5 بار
              avg_loss = total_loss / (step + 1)
              avg_rec_loss = total_rec_loss / (step + 1)
              avg_ssl_loss = total_ssl_loss / (step + 1)
              print(f'[{step + 1}/{len(slices)}] Tot Loss: {avg_loss:.4f}, Rec Loss: {avg_rec_loss:.4f}, SSL Loss: {avg_ssl_loss:.4f}')
 
     model.scheduler.step()
-    len_slices_val = len(slices) if slices else 1
+    len_slices_val = len(slices) if slices else 1 # جلوگیری از تقسیم بر صفر
     print(f'\tAvg Loss:\t{total_loss / len_slices_val:.4f}')
     print(f'\tAvg Rec Loss:\t{total_rec_loss / len_slices_val:.4f}')
     print(f'\tAvg SSL Loss:\t{total_ssl_loss / len_slices_val:.4f}')
@@ -404,23 +400,25 @@ def train_test(model, train_data, test_data, opt):
     hit, mrr, precision = [], [], []
     k_metric = 20 # برای Recall@20, MRR@20, Precision@20
 
-    test_slices_eval = test_data.generate_batch(model.batch_size)
-    with torch.no_grad():
+    # استفاده از opt.batchSize در اینجا هم برای سازگاری
+    test_slices_eval = test_data.generate_batch(opt.batchSize)
+    with torch.no_grad(): # اطمینان از غیرفعال بودن محاسبه گرادیان
         for k_slice_eval in test_slices_eval:
             targets, scores, _ = forward(model, k_slice_eval, test_data, is_train=False)
             # topk روی GPU انجام می‌شود
-            _, sub_scores_indices = scores.topk(k_metric, dim=1)
+            _, sub_scores_indices = scores.topk(k_metric, dim=1) # _ برای مقادیر امتیازات که لازم نیستند
 
             # انتقال به CPU فقط برای محاسبات NumPy
             sub_scores_indices_cpu = sub_scores_indices.cpu().numpy()
             targets_cpu = targets.cpu().numpy()
 
             for score_idx_list, target_item_id in zip(sub_scores_indices_cpu, targets_cpu):
-                 if target_item_id > 0: # فقط اهداف معتبر
+                 if target_item_id > 0: # فقط اهداف معتبر (غیر پدینگ)
                     target_item_id_zero_based = target_item_id - 1 # تبدیل به اندیس 0 پایه
                     is_hit = np.isin(target_item_id_zero_based, score_idx_list)
                     hit.append(is_hit)
                     if is_hit:
+                        # اگر is_hit درست است، آیتم قطعاً در لیست است
                         rank = np.where(score_idx_list == target_item_id_zero_based)[0][0] + 1
                         mrr.append(1.0 / rank)
                         precision.append(1.0 / k_metric)
