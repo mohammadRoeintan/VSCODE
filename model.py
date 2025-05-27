@@ -29,22 +29,38 @@ class GlobalGCN(Module):
 
     def forward(self, x, adj_sparse_matrix_normalized):
         # x: (N, in_features), adj_sparse_matrix_normalized: (N, N) sparse
-        support = self.linear(x)  # X * W : (N, out_features)
-
-        # Ensure inputs to torch.sparse.mm are float32 when AMP is enabled
-        # The sparse matrix should ideally be created as float32 and kept that way.
-        # We primarily need to worry about 'support' if it got cast to Half by autocast.
-        if support.dtype == torch.half:
-            support = support.float() # Cast to float32
         
-        # adj_sparse_matrix_normalized should be float32 from creation
-        # If not, ensure it is:
-        # if adj_sparse_matrix_normalized.dtype != torch.float32:
-        #     adj_sparse_matrix_normalized = adj_sparse_matrix_normalized.float()
+        # Linear transformation: X * W
+        # This operation might produce a 'Half' tensor for 'support' under autocast
+        support = self.linear(x)  # Potentially (N, out_features) in Half
 
+        # --- Ensure inputs to torch.sparse.mm are float32 ---
+        current_adj = adj_sparse_matrix_normalized
+        current_support = support
 
-        # Use torch.sparse.mm for sparse matrix multiplication
-        output = torch.sparse.mm(adj_sparse_matrix_normalized, support) # A_hat * X * W
+        # 1. Ensure the dense matrix ('support') is float32
+        if current_support.dtype == torch.half:
+            current_support = current_support.float()
+
+        # 2. Ensure the sparse matrix ('adj_sparse_matrix_normalized') is float32.
+        #    Sparse tensors store their values in a dense tensor, check its dtype.
+        if current_adj.is_sparse:
+            if current_adj.values().dtype == torch.half:
+                # Re-create the sparse tensor with float32 values if its values are half
+                current_adj = torch.sparse_coo_tensor(
+                    current_adj.indices(),
+                    current_adj.values().float(), # Cast values to float32
+                    current_adj.size(),
+                    dtype=torch.float32, # Explicitly set dtype for the new sparse tensor
+                    device=current_adj.device
+                )
+        elif current_adj.dtype == torch.half: # Should not happen if it's always sparse
+             current_adj = current_adj.float()
+        # --- End of float32 enforcement ---
+        
+        # Perform sparse matrix multiplication with float32 tensors
+        output = torch.sparse.mm(current_adj, current_support) # A_hat * X * W
+        
         return output
 
 
