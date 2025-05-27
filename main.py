@@ -8,7 +8,9 @@ from utils import Data, split_validation
 from model import SessionGraph, train_test
 import torch
 import numpy as np
+import torch.serialization # Added for add_safe_globals
 
+# --- (Your existing parser arguments) ---
 parser = argparse.ArgumentParser()
 parser.add_argument('--dataset', default='sample', help='dataset name: diginetica/yoochoose1_4/yoochoose1_64/sample')
 parser.add_argument('--batchSize', type=int, default=100, help='input batch size')
@@ -31,9 +33,9 @@ parser.add_argument('--nhead', type=int, default=2, help='number of heads in tra
 parser.add_argument('--nlayers', type=int, default=2, help='number of layers in transformer encoder')
 parser.add_argument('--ff_hidden', type=int, default=256, help='dimension of feedforward network model in transformer')
 parser.add_argument('--dropout', type=float, default=0.1, help='dropout rate in transformer')
+# --- آرگومان جدید برای مسیر چک‌پوینت ---
+parser.add_argument('--resume_from_checkpoint', type=str, default=None, help='Path to the checkpoint file to resume training from.')
 
-# --- آرگومان جدید برای بارگذاری مدل ذخیره شده ---
-parser.add_argument('--resume_checkpoint', type=str, default=None, help='Path to checkpoint file to resume training from.')
 
 opt = parser.parse_args()
 print(opt)
@@ -43,10 +45,8 @@ print(f"Using device: {device}")
 
 
 def main():
+    # --- (Your existing data loading and n_node calculation logic) ---
     base_dataset_path = './datasets/'
-    start_epoch = 0 # اپوک شروع به صورت پیش‌فرض 0 است
-    best_result = [0, 0, 0] # Recall, MRR, Precision
-    best_epoch = [0, 0, 0] # اپوک‌هایی که بهترین نتایج در آن‌ها به دست آمده
 
     if opt.dataset == 'sample':
         train_data_file = os.path.join(base_dataset_path, 'train.txt')
@@ -189,7 +189,7 @@ def main():
     except ValueError as e:
         print(f"Error creating Test/Validation Data object: {e}")
         return
-
+    
     model = SessionGraph(opt, n_node)
     model.to(device)
 
@@ -198,41 +198,66 @@ def main():
         os.makedirs(checkpoint_dir)
         print(f"Created checkpoint directory: {checkpoint_dir}")
 
-    # --- بارگذاری Checkpoint در صورت نیاز ---
-    if opt.resume_checkpoint and os.path.exists(opt.resume_checkpoint):
-        print(f"Resuming training from checkpoint: {opt.resume_checkpoint}")
+    start_epoch = 0
+    best_result = [0, 0, 0]
+    best_epoch = [0, 0, 0]
+    bad_counter = 0
+
+    # <<< --- MODIFIED CHECKPOINT LOADING --- >>>
+    if opt.resume_from_checkpoint and os.path.exists(opt.resume_from_checkpoint):
+        print(f"Resuming training from checkpoint: {opt.resume_from_checkpoint}")
         try:
-            checkpoint = torch.load(opt.resume_checkpoint, map_location=device)
+            # Add the potentially problematic NumPy type to safe globals temporarily
+            # You might need to add other types if more errors appear.
+            # This list can be extended based on future errors.
+            # Common ones often include various numpy scalar types.
+            custom_safe_globals = [np.ScalarType, np._core.multiarray.scalar]
+            
+            # It's often safer to use the context manager if you only need it for this load
+            with torch.serialization.safe_globals(custom_safe_globals):
+                checkpoint = torch.load(opt.resume_from_checkpoint, map_location=device, weights_only=False)
+            
+            # If the above still causes issues with more numpy types, you might need to
+            # discover them and add to custom_safe_globals or use a broader approach if trusted:
+            # Example:
+            # import numpy
+            # all_numpy_scalars = [getattr(numpy, name) for name in dir(numpy) if isinstance(getattr(numpy, name), type) and issubclass(getattr(numpy, name), numpy.generic)]
+            # with torch.serialization.safe_globals(all_numpy_scalars):
+            #    checkpoint = torch.load(opt.resume_from_checkpoint, map_location=device, weights_only=False)
+
+
             model.load_state_dict(checkpoint['model_state_dict'])
             model.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
             model.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
             start_epoch = checkpoint['epoch'] + 1
-            best_result = checkpoint.get('best_result', [0, 0, 0]) # مقدار پیش‌فرض اگر در checkpoint قدیمی نباشد
-            best_epoch = checkpoint.get('best_epoch', [0, 0, 0])   # مقدار پیش‌فرض
-            # opt_checkpoint = checkpoint.get('opt', None) # می‌توان برای بررسی سازگاری استفاده کرد
-            print(f"Loaded checkpoint. Resuming from epoch {start_epoch}.")
-            print(f"Previous best results: Recall@{best_epoch[0]}={best_result[0]:.4f}, MRR@{best_epoch[1]}={best_result[1]:.4f}, Precision@{best_epoch[2]}={best_result[2]:.4f}")
-        except Exception as e:
+            best_result = checkpoint.get('best_result', best_result) # Use .get for backward compatibility
+            # opt_loaded = checkpoint.get('opt', opt) # Be careful with loading opt, it might override current settings
+            print(f"Successfully loaded checkpoint. Resuming from epoch {start_epoch}.")
+            print(f"Previous best result: {best_result}")
+
+        except RuntimeError as e:
             print(f"Error loading checkpoint: {e}. Starting training from scratch.")
             start_epoch = 0
-            best_result = [0,0,0]
-            best_epoch = [0,0,0]
+            # Potentially delete corrupted checkpoint or log the error more thoroughly
+        except Exception as e:
+            print(f"An unexpected error occurred while loading checkpoint: {e}. Starting training from scratch.")
+            start_epoch = 0
     else:
-        if opt.resume_checkpoint:
-             print(f"Checkpoint file not found at {opt.resume_checkpoint}. Starting training from scratch.")
+        if opt.resume_from_checkpoint:
+            print(f"Checkpoint file not found at {opt.resume_from_checkpoint}. Starting training from scratch.")
         else:
-             print("No checkpoint specified. Starting training from scratch.")
-    # -------------------------------------
+            print("No checkpoint specified. Starting training from scratch.")
+    # <<< --- END OF MODIFIED CHECKPOINT LOADING --- >>>
+
 
     start_time = time.time()
-    bad_counter = 0
 
-    for epoch_num in range(start_epoch, opt.epoch):
+    for epoch_num in range(start_epoch, opt.epoch): # Start from start_epoch
         print(f"{'-'*25} Epoch: {epoch_num} {'-'*25}")
 
         if train_data_obj is None or train_data_obj.length == 0:
             print(f"Epoch {epoch_num}: No training data. Skipping epoch.")
-            if epoch_num == 0 :
+            if epoch_num == 0 and start_epoch == 0:
                  print("Exiting: No training data available from the start.")
                  return
             continue
@@ -252,86 +277,56 @@ def main():
                 best_result[0] = recall
                 best_epoch[0] = epoch_num
                 flag = 1
-                # ذخیره مدل با بهترین Recall
-                best_recall_model_path = os.path.join(checkpoint_dir, f'model_best_recall.pth')
-                print(f"New best recall: {recall:.4f}. Saving model to {best_recall_model_path}")
-                torch.save({
-                    'epoch': epoch_num,
-                    'model_state_dict': model.state_dict(),
-                    'optimizer_state_dict': model.optimizer.state_dict(),
-                    'scheduler_state_dict': model.scheduler.state_dict(),
-                    'best_result': best_result,
-                    'best_epoch': best_epoch,
-                    'opt': opt
-                }, best_recall_model_path)
-
             if mrr >= best_result[1]:
                 best_result[1] = mrr
                 best_epoch[1] = epoch_num
                 flag = 1
-                # ذخیره مدل با بهترین MRR
-                best_mrr_model_path = os.path.join(checkpoint_dir, f'model_best_mrr.pth')
-                print(f"New best MRR: {mrr:.4f}. Saving model to {best_mrr_model_path}")
-                torch.save({
-                    'epoch': epoch_num,
-                    'model_state_dict': model.state_dict(),
-                    'optimizer_state_dict': model.optimizer.state_dict(),
-                    'scheduler_state_dict': model.scheduler.state_dict(),
-                    'best_result': best_result,
-                    'best_epoch': best_epoch,
-                    'opt': opt
-                }, best_mrr_model_path)
-
             if precision >= best_result[2]:
                 best_result[2] = precision
                 best_epoch[2] = epoch_num
                 flag = 1
-                # ذخیره مدل با بهترین Precision
-                best_precision_model_path = os.path.join(checkpoint_dir, f'model_best_precision.pth')
-                print(f"New best precision: {precision:.4f}. Saving model to {best_precision_model_path}")
+            print('Current Best Result (on available evaluation data):')
+            print(f'\tRecall@20: {best_result[0]:.4f}\tMRR@20: {best_result[1]:.4f}\tPrecision@20: {best_result[2]:.4f}\tEpochs: ({best_epoch[0]}, {best_epoch[1]}, {best_epoch[2]})')
+            
+            # Save model if it's the best on MRR (or your primary metric)
+            if flag == 1: # Or specifically check if mrr improved
+                best_model_save_path = os.path.join(checkpoint_dir, f'model_best.pth')
                 torch.save({
                     'epoch': epoch_num,
                     'model_state_dict': model.state_dict(),
                     'optimizer_state_dict': model.optimizer.state_dict(),
                     'scheduler_state_dict': model.scheduler.state_dict(),
                     'best_result': best_result,
-                    'best_epoch': best_epoch,
-                    'opt': opt
-                }, best_precision_model_path)
+                    'opt': opt # Saving opt is good for reproducibility
+                }, best_model_save_path)
+                print(f'Best model checkpoint saved to {best_model_save_path}')
 
-            print('Current Best Result (on available evaluation data):')
-            print(f'\tRecall@20: {best_result[0]:.4f} (Epoch {best_epoch[0]})\tMRR@20: {best_result[1]:.4f} (Epoch {best_epoch[1]})\tPrecision@20: {best_result[2]:.4f} (Epoch {best_epoch[2]})')
-            
             bad_counter += (1 - flag)
             if bad_counter >= opt.patience:
-                print(f"Early stopping triggered after {opt.patience} epochs without improvement in any metric.")
+                print(f"Early stopping triggered after {opt.patience} epochs without improvement.")
                 break
         else:
             print(f'Epoch {epoch_num} completed (no evaluation data). Recall: {recall:.4f}, MRR: {mrr:.4f}, Precision: {precision:.4f}')
 
-        # --- ذخیره سازی جامع Checkpoint در هر اپوک ---
-        model_save_path = os.path.join(checkpoint_dir, f'model_epoch_{epoch_num}.pth')
-        torch.save({
-            'epoch': epoch_num,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': model.optimizer.state_dict(),
-            'scheduler_state_dict': model.scheduler.state_dict(),
-            'best_result': best_result, # ذخیره بهترین نتایج تا این اپوک
-            'best_epoch': best_epoch,   # ذخیره اپوک‌های بهترین نتایج تا این اپوک
-            'current_metrics': {'recall': recall, 'mrr': mrr, 'precision': precision}, # نتایج این اپوک
-            'opt': opt # ذخیره تنظیمات استفاده شده برای این اجرا
-        }, model_save_path)
-        print(f'Model checkpoint for epoch {epoch_num} saved to {model_save_path}')
-        # -------------------------------------------
+        # Save checkpoint for current epoch (optional, can take a lot of space)
+        # model_save_path = os.path.join(checkpoint_dir, f'model_epoch_{epoch_num}.pth')
+        # torch.save({
+        #     'epoch': epoch_num,
+        #     'model_state_dict': model.state_dict(),
+        #     'optimizer_state_dict': model.optimizer.state_dict(),
+        #     'scheduler_state_dict': model.scheduler.state_dict(),
+        #     'best_result': best_result,
+        #     'opt': opt
+        # }, model_save_path)
+        # print(f'Model checkpoint for epoch {epoch_num} saved to {model_save_path}')
+
 
     print(f"{'-'*25} Training Finished {'-'*25}")
     end_time = time.time()
     print(f"Total Run time: {end_time - start_time:.2f} s")
     if test_data_obj_for_eval and test_data_obj_for_eval.length > 0:
         print("Final Best Overall Result (on available evaluation data):")
-        print(f'\tRecall@20: {best_result[0]:.4f} (Achieved at Epoch {best_epoch[0]})')
-        print(f'\tMRR@20: {best_result[1]:.4f} (Achieved at Epoch {best_epoch[1]})')
-        print(f'\tPrecision@20: {best_result[2]:.4f} (Achieved at Epoch {best_epoch[2]})')
+        print(f'\tRecall@20: {best_result[0]:.4f}\tMRR@20: {best_result[1]:.4f}\tPrecision@20: {best_result[2]:.4f}\tAchieved at Epochs: ({best_epoch[0]}, {best_epoch[1]}, {best_epoch[2]})')
     else:
         print("Training finished (no evaluation data was available to determine best results).")
 
