@@ -230,31 +230,26 @@ class SessionGraph(Module):
 
 
     def _get_enriched_item_embeddings(self):
-        all_item_initial_embeddings = self.embedding.weight # This could be Half if autocast is aggressive
-        
+        if hasattr(self, '_cached_enriched_embeddings'):
+            return self._cached_enriched_embeddings
+    
+        all_item_initial_embeddings = self.embedding.weight
+    
         if self.use_global_graph and self.global_gcn_layers_module is not None:
-            # Temporarily disable autocast for this specific block to ensure float32 computation
-            # for the sparse operations.
-            with autocast(enabled=False): # Turn off autocast for this scope
-                current_embeddings_float32 = all_item_initial_embeddings.float() # Explicitly convert to float32
-                
+            with autocast(enabled=False):
+                current_embeddings_float32 = all_item_initial_embeddings.float()
                 adj_float32_coalesced = self.global_adj_sparse_matrix_normalized
-                # Adjacency matrix is already ensured to be float32 and coalesced in __init__
-                # and GlobalGCN.forward will also double check its inputs.
-
+    
                 for gcn_layer in self.global_gcn_layers_module:
-                    # gcn_layer.forward is now robust to receive float32 and operate in float32
                     current_embeddings_float32 = gcn_layer(current_embeddings_float32, adj_float32_coalesced)
                     current_embeddings_float32 = F.relu(current_embeddings_float32)
-            
-            # After this block, current_embeddings_float32 is float32.
-            # If the outer autocast context (in train_test) is active and expects Half,
-            # subsequent operations on this tensor might be cast to Half by PyTorch.
-            return current_embeddings_float32
+    
+            # 🧠 کش کردن نتیجه برای دفعات بعد
+            self._cached_enriched_embeddings = current_embeddings_float32
+            return self._cached_enriched_embeddings
         else:
-            # If not using global graph, return initial embeddings.
-            # Their type will be handled by the outer autocast context.
             return all_item_initial_embeddings
+
 
 
     def _process_session_graph_local(self, items_local_session_ids, A_local_session_adj, enriched_all_item_embeddings):
