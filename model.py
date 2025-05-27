@@ -347,9 +347,8 @@ def forward(model: SessionGraph, i_batch_indices, data_loader: utils.Data, is_tr
         alias_inputs, A_local_adj, items_local_ids, mask_for_seq, is_train=is_train
     )
     return targets, scores, ssl_loss
-
 def train_test(model: SessionGraph, train_data: utils.Data, eval_data: utils.Data, opt: argparse.Namespace):
-    use_amp = torch.cuda.is_available() # True if CUDA is available, False otherwise
+    use_amp = torch.cuda.is_available()
     scaler = GradScaler(enabled=use_amp) 
     
     model.train()
@@ -364,9 +363,10 @@ def train_test(model: SessionGraph, train_data: utils.Data, eval_data: utils.Dat
             if not hasattr(model, 'optimizer'):
                 print("CRITICAL ERROR: model.optimizer is not set!")
                 return 0.0, 0.0, 0.0 
+            
             model.optimizer.zero_grad(set_to_none=True)
             
-            with autocast(enabled=use_amp): # Autocast context for mixed precision
+            with autocast(enabled=use_amp):
                 targets, scores, ssl_loss = forward(model, batch_indices, train_data, is_train=True)
                 valid_targets_mask = (targets > 0) & (targets < model.n_node)
                 rec_loss = torch.tensor(0.0, device=scores.device)
@@ -375,13 +375,12 @@ def train_test(model: SessionGraph, train_data: utils.Data, eval_data: utils.Dat
                     rec_loss = model.loss_function(scores[valid_targets_mask], target_values_0_based)
                 current_batch_loss = rec_loss + model.ssl_weight * ssl_loss
             
-            if use_amp:
-                scaler.scale(current_batch_loss).backward()
-                scaler.step(model.optimizer)
-                scaler.update()
-            else:
-                current_batch_loss.backward()
-                model.optimizer.step()
+            # Scale the loss and perform backward pass
+            scaler.scale(current_batch_loss).backward()
+            
+            # Unscale gradients and update weights
+            scaler.step(model.optimizer)
+            scaler.update()
             
             total_loss_epoch += current_batch_loss.item()
             total_rec_loss_epoch += rec_loss.item()
@@ -397,6 +396,7 @@ def train_test(model: SessionGraph, train_data: utils.Data, eval_data: utils.Dat
     if hasattr(model, 'scheduler'):
         model.scheduler.step()
     
+    # Evaluation code remains the same...
     model.eval()
     k_metric = opt.k_metric 
     final_recall_at_k, final_mrr_at_k, final_precision_at_k = 0.0, 0.0, 0.0
@@ -407,9 +407,6 @@ def train_test(model: SessionGraph, train_data: utils.Data, eval_data: utils.Dat
         if eval_batch_slices:
             with torch.no_grad():
                 for batch_indices_eval in eval_batch_slices:
-                    # Note: Evaluation is also done under autocast if use_amp is True.
-                    # This is generally fine and can speed up evaluation.
-                    # If issues arise, you could disable autocast for evaluation.
                     with autocast(enabled=use_amp):
                         targets_eval, scores_eval, _ = forward(model, batch_indices_eval, eval_data, is_train=False)
                     
