@@ -27,26 +27,23 @@ class GlobalGCN(Module):
     def __init__(self, in_features, out_features, bias=False):
         super(GlobalGCN, self).__init__()
         self.linear = nn.Linear(in_features, out_features, bias=bias)
+        # Ensure the linear layer itself operates in float32
+        self.linear.float() 
 
     def forward(self, x, adj_sparse_matrix_normalized):
         # x: (N, in_features), adj_sparse_matrix_normalized: (N, N) sparse
         
-        # --- Critical: Ensure all operations for sparse.mm are in float32 ---
-        # Cast input 'x' to float32 for the linear layer if it's not already
-        x_float = x
-        if x.dtype == torch.half:
-            x_float = x.float()
+        # Ensure inputs are float32 for this GCN layer
+        x_float = x.float() # Explicitly cast input features to float32
         
-        support = self.linear(x_float)  # X * W : (N, out_features) - now definitely float32
-
         current_adj = adj_sparse_matrix_normalized
-        
         # Ensure adjacency matrix is coalesced and its values are float32
         if current_adj.is_sparse:
             if not current_adj.is_coalesced():
                 current_adj = current_adj.coalesce()
             
-            if current_adj.values().dtype == torch.half:
+            if current_adj.values().dtype != torch.float32:
+                # This should ideally not happen if buffer is correctly float32
                 current_adj = torch.sparse_coo_tensor(
                     current_adj.indices(),
                     current_adj.values().float(), # Cast values to float32
@@ -54,11 +51,15 @@ class GlobalGCN(Module):
                     dtype=torch.float32, # Explicitly set dtype for the new sparse tensor
                     device=current_adj.device
                 ).coalesce() # Coalesce again after potential recreation
-        elif current_adj.dtype == torch.half: # Should not be dense, but as a fallback
+        elif current_adj.dtype != torch.float32: # Fallback if it's dense for some reason
              current_adj = current_adj.float()
         
-        # Perform sparse matrix multiplication with float32 tensors
-        output = torch.sparse.mm(current_adj, support) # A_hat * X * W
+        # Linear transformation (self.linear is already .float())
+        support = self.linear(x_float) # Input x_float is float32, output support is float32
+        
+        # Perform sparse matrix multiplication
+        # Both current_adj and support should now be float32
+        output = torch.sparse.mm(current_adj, support) 
         
         return output
 
@@ -189,22 +190,19 @@ class SessionGraph(Module):
         if self.num_global_gcn_layers_config > 0 and global_adj_sparse_matrix is not None:
             current_adj_for_buffer = global_adj_sparse_matrix
             if not current_adj_for_buffer.is_sparse:
-                print("Warning: Global adjacency matrix for buffer is not sparse. Coalescing.")
-                current_adj_for_buffer = current_adj_for_buffer.to_sparse_coo().coalesce()
-            elif not current_adj_for_buffer.is_coalesced():
-                print("Warning: Global adjacency matrix for buffer is sparse but not coalesced. Coalescing.")
+                current_adj_for_buffer = current_adj_for_buffer.to_sparse_coo() # .coalesce() will be called below
+            
+            if not current_adj_for_buffer.is_coalesced():
                 current_adj_for_buffer = current_adj_for_buffer.coalesce()
 
-            # Ensure the buffer itself is float32
             if current_adj_for_buffer.values().dtype != torch.float32:
-                print(f"Warning: Global adj buffer values are {current_adj_for_buffer.values().dtype}. Converting to float32.")
                 current_adj_for_buffer = torch.sparse_coo_tensor(
                     current_adj_for_buffer.indices(),
                     current_adj_for_buffer.values().float(),
                     current_adj_for_buffer.size(),
                     dtype=torch.float32,
                     device=current_adj_for_buffer.device
-                ).coalesce()
+                ).coalesce() # Ensure coalesced after recreation
 
             self.register_buffer('global_adj_sparse_matrix_normalized', current_adj_for_buffer)
             
@@ -212,7 +210,7 @@ class SessionGraph(Module):
             for _ in range(self.num_global_gcn_layers_config):
                 self.global_gcn_layers_module.append(GlobalGCN(self.hidden_size, self.hidden_size))
             self.use_global_graph = True
-            print(f"SessionGraph: Using {self.num_global_gcn_layers_config} global GCN layers. Sparse adj matrix shape: {self.global_adj_sparse_matrix_normalized.shape}, nnz: {self.global_adj_sparse_matrix_normalized._nnz()}, dtype: {self.global_adj_sparse_matrix_normalized.dtype}, values_dtype: {self.global_adj_sparse_matrix_normalized.values().dtype}")
+            print(f"SessionGraph: Using {self.num_global_gcn_layers_config} global GCN layers. Sparse adj matrix shape: {self.global_adj_sparse_matrix_normalized.shape}, nnz: {self.global_adj_sparse_matrix_normalized._nnz()}, values_dtype: {self.global_adj_sparse_matrix_normalized.values().dtype}")
         else:
             self.global_adj_sparse_matrix_normalized = None
             print("SessionGraph: Global graph processing is disabled.")
@@ -245,73 +243,58 @@ class SessionGraph(Module):
         stdv = 1.0 / math.sqrt(self.hidden_size)
         for name, param in self.named_parameters():
             if not param.requires_grad: continue
-            if 'weight_ih' in name or 'weight_hh' in name or \
-               (hasattr(param, 'is_leaf') and param.is_leaf and param.dim() > 1 and 'embedding' not in name and 'linear' in name): # Check for linear layer weights
+            if 'embedding.weight' == name: # Special handling for initial embedding
+                 nn.init.normal_(param, mean=0, std=0.01) # Common for embeddings
+                 if self.embedding.padding_idx is not None:
+                     with torch.no_grad():
+                         param[self.embedding.padding_idx].fill_(0)
+            elif 'weight_ih' in name or 'weight_hh' in name or (param.dim() > 1 and 'weight' in name): # Other weights
                 nn.init.xavier_uniform_(param)
-            elif 'bias' in name or (param.dim() == 1 and 'weight' not in name):
+            elif 'bias' in name or param.dim() == 1 : # Biases or 1D params like b_iah
                 nn.init.uniform_(param, -stdv, stdv)
-            elif 'embedding.weight' in name:
-                nn.init.normal_(param, mean=0, std=0.01)
         
-        with torch.no_grad():
-            if self.embedding.padding_idx is not None:
-                self.embedding.weight[self.embedding.padding_idx].fill_(0)
-        
+        # GlobalGCN layers are already .float(), their nn.Linear will be xavier_uniform by default if not re-init here
+        # If specific re-init is needed for GlobalGCN linear layers:
         if self.global_gcn_layers_module is not None:
             for gcn_layer in self.global_gcn_layers_module:
-                if hasattr(gcn_layer, 'linear') and hasattr(gcn_layer.linear, 'weight'):
-                     nn.init.xavier_uniform_(gcn_layer.linear.weight)
-
+                 if hasattr(gcn_layer, 'linear') and hasattr(gcn_layer.linear, 'weight'):
+                      nn.init.xavier_uniform_(gcn_layer.linear.weight)
+                      if gcn_layer.linear.bias is not None:
+                           nn.init.zeros_(gcn_layer.linear.bias) # Or uniform as well
 
     def _get_enriched_item_embeddings(self):
         all_item_initial_embeddings = self.embedding.weight
         
         if self.use_global_graph and self.global_gcn_layers_module is not None:
-            # --- Perform GCN operations explicitly in float32 ---
-            # The autocast context is active outside this function.
-            # We need to ensure inputs to GlobalGCN are float32 and GlobalGCN itself works in float32.
+            # Start with float32 embeddings for GCN processing
+            current_embeddings_float32 = all_item_initial_embeddings.float() 
             
-            current_embeddings_float32 = all_item_initial_embeddings.float() # Start with float32
-            
-            # Adjacency matrix should already be float32 and coalesced from __init__
-            adj_float32_coalesced = self.global_adj_sparse_matrix_normalized 
-            
-            # Double check adj properties (for debugging, can be removed if confident)
-            if not adj_float32_coalesced.is_coalesced():
-                # print("Warning: Adj matrix in _get_enriched_item_embeddings was not coalesced! Re-coalescing.")
-                adj_float32_coalesced = adj_float32_coalesced.coalesce()
-            if adj_float32_coalesced.values().dtype != torch.float32:
-                # print(f"Warning: Adj matrix values in _get_enriched_item_embeddings were {adj_float32_coalesced.values().dtype}! Re-creating as float32.")
-                adj_float32_coalesced = torch.sparse_coo_tensor(
-                    adj_float32_coalesced.indices(),
-                    adj_float32_coalesced.values().float(),
-                    adj_float32_coalesced.size(),
-                    dtype=torch.float32,
-                    device=adj_float32_coalesced.device
-                ).coalesce()
+            adj_for_gcn = self.global_adj_sparse_matrix_normalized 
+            # Adjacency matrix is ensured to be float32 and coalesced in __init__ and GlobalGCN.forward
 
-
-            for i, gcn_layer in enumerate(self.global_gcn_layers_module):
-                # The gcn_layer.forward is now designed to handle float32 inputs for sparse.mm
-                current_embeddings_float32 = gcn_layer(current_embeddings_float32, adj_float32_coalesced)
+            for gcn_layer in self.global_gcn_layers_module:
+                # gcn_layer.forward now internally ensures float32 operations for sparse.mm
+                current_embeddings_float32 = gcn_layer(current_embeddings_float32, adj_for_gcn)
                 current_embeddings_float32 = F.relu(current_embeddings_float32) 
             
-            # The output 'current_embeddings_float32' is float32.
-            # If the rest of the model under autocast expects Half, autocast might convert it back.
-            # Or, we can cast it back to the original embedding dtype if needed by subsequent layers
-            # that are optimized for Half precision AND are not sparse.
-            # For now, returning float32 is safer for subsequent embedding lookups.
+            # The output current_embeddings_float32 is float32.
+            # Autocast (if active outside) will handle subsequent conversions if necessary.
             return current_embeddings_float32
         else:
+            # If not using global graph, return initial embeddings.
+            # Autocast will handle their type if active.
             return all_item_initial_embeddings
 
 
     def _process_session_graph_local(self, items_local_session_ids, A_local_session_adj, enriched_all_item_embeddings):
+        # enriched_all_item_embeddings might be float32 or half depending on _get_enriched_item_embeddings
+        # and whether global graph was used. F.embedding handles this.
         hidden_local_session_enriched = F.embedding(
             items_local_session_ids, 
             enriched_all_item_embeddings, 
             padding_idx=0 
         )
+        # GNN local operations will be affected by autocast if active
         hidden_local_session_processed = self.gnn_local(A_local_session_adj, hidden_local_session_enriched)
         return hidden_local_session_processed
 
@@ -343,7 +326,11 @@ class SessionGraph(Module):
         return scores
 
     def forward_model_logic(self, alias_inputs_local_ids, A_local_adj, items_local_ids, mask_for_seq, is_train=True):
-        enriched_all_item_embeddings = self._get_enriched_item_embeddings()
+        enriched_all_item_embeddings = self._get_enriched_item_embeddings() # Output can be float32
+        
+        # Subsequent operations will be under autocast if active.
+        # enriched_all_item_embeddings (if float32) will be used by F.embedding.
+        # If autocast converts it to Half for F.embedding, that's usually fine.
         hidden_session_items_processed = self._process_session_graph_local(
             items_local_ids, A_local_adj, enriched_all_item_embeddings
         )
@@ -358,6 +345,8 @@ class SessionGraph(Module):
             src=seq_hidden_with_pos,
             src_key_padding_mask=src_key_padding_mask
         )
+        # scores calculation uses enriched_all_item_embeddings, which might be float32.
+        # Matmuls in compute_scores will be affected by autocast.
         scores = self.compute_scores(output_transformer, mask_for_seq, enriched_all_item_embeddings)
 
         ssl_loss_value = torch.tensor(0.0, device=scores.device)
@@ -418,8 +407,7 @@ def train_test(model: SessionGraph, train_data: utils.Data, eval_data: utils.Dat
                 return 0.0, 0.0, 0.0 
             model.optimizer.zero_grad(set_to_none=True)
             
-            # Autocast context for mixed precision
-            with autocast(enabled=use_amp):
+            with autocast(enabled=use_amp): # Autocast context for mixed precision
                 targets, scores, ssl_loss = forward(model, batch_indices, train_data, is_train=True)
                 valid_targets_mask = (targets > 0) & (targets < model.n_node)
                 rec_loss = torch.tensor(0.0, device=scores.device)
@@ -438,7 +426,7 @@ def train_test(model: SessionGraph, train_data: utils.Data, eval_data: utils.Dat
             
             total_loss_epoch += current_batch_loss.item()
             total_rec_loss_epoch += rec_loss.item()
-            total_ssl_loss_epoch += ssl_loss.item() if isinstance(ssl_loss, torch.Tensor) else ssl_loss # Ensure ssl_loss is itemized if tensor
+            total_ssl_loss_epoch += ssl_loss.item() if isinstance(ssl_loss, torch.Tensor) else ssl_loss
             
             if (step + 1) % max(1, num_train_batches // 5) == 0 or step == num_train_batches - 1:
                 avg_total_loss = total_loss_epoch / (step + 1)
@@ -460,9 +448,7 @@ def train_test(model: SessionGraph, train_data: utils.Data, eval_data: utils.Dat
         if eval_batch_slices:
             with torch.no_grad():
                 for batch_indices_eval in eval_batch_slices:
-                    # Forward pass for evaluation is also under autocast if enabled,
-                    # but gradients are not computed.
-                    with autocast(enabled=use_amp):
+                    with autocast(enabled=use_amp): # Also use autocast for eval if enabled
                         targets_eval, scores_eval, _ = forward(model, batch_indices_eval, eval_data, is_train=False)
                     
                     _, top_k_indices_0_based = scores_eval.topk(k_metric, dim=1)
