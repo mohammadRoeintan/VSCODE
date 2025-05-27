@@ -230,26 +230,31 @@ class SessionGraph(Module):
 
 
     def _get_enriched_item_embeddings(self):
-        if hasattr(self, '_cached_enriched_embeddings'):
-            return self._cached_enriched_embeddings
-    
-        all_item_initial_embeddings = self.embedding.weight
-    
+        all_item_initial_embeddings = self.embedding.weight # This could be Half if autocast is aggressive
+        
         if self.use_global_graph and self.global_gcn_layers_module is not None:
-            with autocast(enabled=False):
-                current_embeddings_float32 = all_item_initial_embeddings.float()
+            # Temporarily disable autocast for this specific block to ensure float32 computation
+            # for the sparse operations.
+            with autocast(enabled=False): # Turn off autocast for this scope
+                current_embeddings_float32 = all_item_initial_embeddings.float() # Explicitly convert to float32
+                
                 adj_float32_coalesced = self.global_adj_sparse_matrix_normalized
-    
+                # Adjacency matrix is already ensured to be float32 and coalesced in __init__
+                # and GlobalGCN.forward will also double check its inputs.
+
                 for gcn_layer in self.global_gcn_layers_module:
+                    # gcn_layer.forward is now robust to receive float32 and operate in float32
                     current_embeddings_float32 = gcn_layer(current_embeddings_float32, adj_float32_coalesced)
                     current_embeddings_float32 = F.relu(current_embeddings_float32)
-    
-            # 🧠 کش کردن نتیجه برای دفعات بعد
-            self._cached_enriched_embeddings = current_embeddings_float32
-            return self._cached_enriched_embeddings
+            
+            # After this block, current_embeddings_float32 is float32.
+            # If the outer autocast context (in train_test) is active and expects Half,
+            # subsequent operations on this tensor might be cast to Half by PyTorch.
+            return current_embeddings_float32
         else:
+            # If not using global graph, return initial embeddings.
+            # Their type will be handled by the outer autocast context.
             return all_item_initial_embeddings
-
 
 
     def _process_session_graph_local(self, items_local_session_ids, A_local_session_adj, enriched_all_item_embeddings):
@@ -347,8 +352,9 @@ def forward(model: SessionGraph, i_batch_indices, data_loader: utils.Data, is_tr
         alias_inputs, A_local_adj, items_local_ids, mask_for_seq, is_train=is_train
     )
     return targets, scores, ssl_loss
+
 def train_test(model: SessionGraph, train_data: utils.Data, eval_data: utils.Data, opt: argparse.Namespace):
-    use_amp = torch.cuda.is_available()
+    use_amp = torch.cuda.is_available() # True if CUDA is available, False otherwise
     scaler = GradScaler(enabled=use_amp) 
     
     model.train()
@@ -363,10 +369,9 @@ def train_test(model: SessionGraph, train_data: utils.Data, eval_data: utils.Dat
             if not hasattr(model, 'optimizer'):
                 print("CRITICAL ERROR: model.optimizer is not set!")
                 return 0.0, 0.0, 0.0 
-            
             model.optimizer.zero_grad(set_to_none=True)
             
-            with autocast(enabled=use_amp):
+            with autocast(enabled=use_amp): # Autocast context for mixed precision
                 targets, scores, ssl_loss = forward(model, batch_indices, train_data, is_train=True)
                 valid_targets_mask = (targets > 0) & (targets < model.n_node)
                 rec_loss = torch.tensor(0.0, device=scores.device)
@@ -375,12 +380,13 @@ def train_test(model: SessionGraph, train_data: utils.Data, eval_data: utils.Dat
                     rec_loss = model.loss_function(scores[valid_targets_mask], target_values_0_based)
                 current_batch_loss = rec_loss + model.ssl_weight * ssl_loss
             
-            # Scale the loss and perform backward pass
-            scaler.scale(current_batch_loss).backward()
-            
-            # Unscale gradients and update weights
-            scaler.step(model.optimizer)
-            scaler.update()
+            if use_amp:
+                scaler.scale(current_batch_loss).backward()
+                scaler.step(model.optimizer)
+                scaler.update()
+            else:
+                current_batch_loss.backward()
+                model.optimizer.step()
             
             total_loss_epoch += current_batch_loss.item()
             total_rec_loss_epoch += rec_loss.item()
@@ -396,7 +402,6 @@ def train_test(model: SessionGraph, train_data: utils.Data, eval_data: utils.Dat
     if hasattr(model, 'scheduler'):
         model.scheduler.step()
     
-    # Evaluation code remains the same...
     model.eval()
     k_metric = opt.k_metric 
     final_recall_at_k, final_mrr_at_k, final_precision_at_k = 0.0, 0.0, 0.0
@@ -407,6 +412,9 @@ def train_test(model: SessionGraph, train_data: utils.Data, eval_data: utils.Dat
         if eval_batch_slices:
             with torch.no_grad():
                 for batch_indices_eval in eval_batch_slices:
+                    # Note: Evaluation is also done under autocast if use_amp is True.
+                    # This is generally fine and can speed up evaluation.
+                    # If issues arise, you could disable autocast for evaluation.
                     with autocast(enabled=use_amp):
                         targets_eval, scores_eval, _ = forward(model, batch_indices_eval, eval_data, is_train=False)
                     
