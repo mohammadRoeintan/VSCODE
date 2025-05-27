@@ -230,6 +230,9 @@ def main():
     # پاس دادن ماتریس پراکنده گلوبال به مدل
     model = SessionGraph(opt, n_node, global_adj_sparse_matrix=global_adj_sparse_tensor)
     model.to(device) # مدل و بافرهای آن (از جمله گراف گلوبال پراکنده) به دستگاه منتقل می‌شوند
+    # ساخت Optimizer و Scheduler و اتصال به مدل
+    model.optimizer = torch.optim.Adam(model.parameters(), lr=opt.lr, weight_decay=opt.l2)
+    model.scheduler = torch.optim.lr_scheduler.StepLR(model.optimizer, step_size=opt.lr_dc_step, gamma=opt.lr_dc)
 
     # ... (بخش چک‌پوینت و حلقه آموزش مثل قبل، با این تفاوت که k_metric از opt خوانده می‌شود) ...
     checkpoint_dir = f'./checkpoints/{opt.dataset}/'
