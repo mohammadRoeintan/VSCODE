@@ -184,7 +184,7 @@ class SessionGraph(Module):
         
         # Get last valid item
         ht = hidden_transformer_output[torch.arange(mask.size(0)), 
-                                      torch.clamp(mask.sum(1) - 1, min=0)]
+                                      torch.clamp(mask.sum(1) - 1, min=0).long()]
         
         # Attention mechanism
         q1 = self.linear_one(ht).unsqueeze(1)
