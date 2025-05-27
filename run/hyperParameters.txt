@@ -1,0 +1,16 @@
+!python main.py \
+--resume_from_checkpoint /root/output_model_v3.pth \
+  --ssl_temp 0.15 \
+  --lr 0.0015 \
+  --lr_dc_step 5 \
+  --validation \
+  --batchSize 160 \
+  --epoch 40 \
+  --dataset yoochoose1_64 \
+  --hiddenSize 256 \
+  --ssl_weight 0.07 \
+  --ssl_dropout_rate 0.3 \
+  --nhead 4 \
+  --dropout 0.25 \
+  --l2 2e-4 \
+  --global_gcn_layers 1
