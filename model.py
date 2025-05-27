@@ -5,55 +5,28 @@ import torch
 from torch import nn
 from torch.nn import Module, Parameter
 import torch.nn.functional as F
-import copy # برای deepcopy در TargetAwareTransformerEncoder
+import copy
 from torch.cuda.amp import autocast, GradScaler
-import pytz # <--- کتابخانه pytz برای کار با مناطق زمانی اضافه شد
+import pytz
 
-# تعریف منطقه زمانی ایران (IRST: UTC+03:30)
 IR_TIMEZONE = pytz.timezone('Asia/Tehran')
 
-# -------------- 1. کلاس PositionalEncoding --------------
 class PositionalEncoding(Module):
     def __init__(self, d_model, dropout=0.1, max_len=5000):
         super(PositionalEncoding, self).__init__()
         self.dropout = nn.Dropout(p=dropout)
-        pe = torch.zeros(max_len, d_model) # ایجاد روی CPU
+        pe = torch.zeros(max_len, d_model)
         position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
         div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
         pe = pe.unsqueeze(0).transpose(0, 1)
-        self.register_buffer('pe', pe) # pe با مدل به دستگاه منتقل می‌شود
+        self.register_buffer('pe', pe)
 
-    def forward(self, x): # x باید روی دستگاه مدل باشد
-        # self.pe از دستگاه مدل استفاده می‌کند
-        if x.dim() == 3 and x.size(1) == self.pe.size(0) and x.size(2) == self.pe.size(2):
-             x = x + self.pe[:x.size(1), :].squeeze(1)
-        elif x.dim() == 3 and x.size(0) == self.pe.size(0):
-             x = x + self.pe[:x.size(0), :]
-        else:
-            seq_len_dim_index = -1
-            if x.dim() == 3:
-                if x.size(1) <= self.pe.size(0): # اولویت با batch_first=True
-                    seq_len_dim_index = 1
-                elif x.size(0) <= self.pe.size(0):
-                    seq_len_dim_index = 0
-
-            if seq_len_dim_index != -1:
-                seq_len = x.size(seq_len_dim_index)
-                current_pe_slice = self.pe[:seq_len, :]
-                if seq_len_dim_index == 1: # batch_first = True
-                     pe_to_add = current_pe_slice.squeeze(1).unsqueeze(0)
-                else: # batch_first = False
-                     pe_to_add = current_pe_slice
-                try:
-                    x = x + pe_to_add
-                except RuntimeError:
-                    # در صورت عدم تطابق ابعاد، از اضافه کردن صرف نظر می‌شود
-                    pass
+    def forward(self, x):
+        x = x + self.pe[:x.size(0), :]
         return self.dropout(x)
 
-# -------------- 2. کلاس GNN --------------
 class GNN(Module):
     def __init__(self, hidden_size, step=1):
         super(GNN, self).__init__()
@@ -61,34 +34,47 @@ class GNN(Module):
         self.hidden_size = hidden_size
         self.input_size = hidden_size * 2
         self.gate_size = 3 * hidden_size
+        
+        # Initialize parameters with Xavier uniform
         self.w_ih = Parameter(torch.Tensor(self.gate_size, self.input_size))
         self.w_hh = Parameter(torch.Tensor(self.gate_size, self.hidden_size))
         self.b_ih = Parameter(torch.Tensor(self.gate_size))
         self.b_hh = Parameter(torch.Tensor(self.gate_size))
         self.b_iah = Parameter(torch.Tensor(self.hidden_size))
         self.b_oah = Parameter(torch.Tensor(self.hidden_size))
+        
         self.linear_edge_in = nn.Linear(self.hidden_size, self.hidden_size, bias=True)
         self.linear_edge_out = nn.Linear(self.hidden_size, self.hidden_size, bias=True)
+        
+        self.reset_parameters()
 
-    def GNNCell(self, A, hidden): # A و hidden باید روی دستگاه باشند
-        # A باید از قبل روی دستگاه صحیح باشد (در تابع forward انجام می‌شود)
-        if torch.isnan(A).any() or torch.isinf(A).any(): A = torch.nan_to_num(A)
-        if torch.isnan(hidden).any() or torch.isinf(hidden).any(): hidden = torch.nan_to_num(hidden)
+    def reset_parameters(self):
+        stdv = 1.0 / math.sqrt(self.hidden_size)
+        for weight in self.parameters():
+            if weight.dim() > 1:
+                nn.init.xavier_uniform_(weight)
+            else:
+                nn.init.uniform_(weight, -stdv, stdv)
 
+    def GNNCell(self, A, hidden):
         A_in = A[:, :, :A.shape[1]]
         A_out = A[:, :, A.shape[1]: 2 * A.shape[1]]
+        
         input_in = torch.matmul(A_in, self.linear_edge_in(hidden)) + self.b_iah
         input_out = torch.matmul(A_out, self.linear_edge_out(hidden)) + self.b_oah
         inputs = torch.cat([input_in, input_out], 2)
+        
         gi = F.linear(inputs, self.w_ih, self.b_ih)
         gh = F.linear(hidden, self.w_hh, self.b_hh)
+        
         i_r, i_i, i_n = gi.chunk(3, 2)
         h_r, h_i, h_n = gh.chunk(3, 2)
+        
         resetgate = torch.sigmoid(i_r + h_r)
         inputgate = torch.sigmoid(i_i + h_i)
         newgate = torch.tanh(i_n + resetgate * h_n)
+        
         hy = newgate + inputgate * (hidden - newgate)
-        if torch.isnan(hy).any() or torch.isinf(hy).any(): hy = torch.nan_to_num(hy)
         return hy
 
     def forward(self, A, hidden):
@@ -96,13 +82,9 @@ class GNN(Module):
             hidden = self.GNNCell(A, hidden)
         return hidden
 
-# -------------- 3. لایه انکودر آگاه از هدف --------------
 class TargetAwareEncoderLayer(Module):
     def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1, activation=F.relu):
         super(TargetAwareEncoderLayer, self).__init__()
-        self.W_sc_q = nn.Linear(d_model, d_model)
-        self.W_sc_k = nn.Linear(d_model, d_model)
-        self.W_sc_v = nn.Linear(d_model, d_model)
         self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
         self.linear1 = nn.Linear(d_model, dim_feedforward)
         self.dropout = nn.Dropout(dropout)
@@ -114,24 +96,17 @@ class TargetAwareEncoderLayer(Module):
         self.activation = activation
 
     def forward(self, src, candidate_embeddings_global, src_mask=None, src_key_padding_mask=None):
-        q_sc = self.W_sc_q(src)
-        k_sc = self.W_sc_k(candidate_embeddings_global)
-        v_sc = self.W_sc_v(candidate_embeddings_global)
-        attn_score_sc = torch.matmul(q_sc, k_sc.transpose(0, 1)) / math.sqrt(q_sc.size(-1))
-        attn_weights_sc = F.softmax(attn_score_sc, dim=-1)
-        context_from_candidates = torch.matmul(attn_weights_sc, v_sc)
-        src_enhanced = src + context_from_candidates
-        sa_output, _ = self.self_attn(src_enhanced, src_enhanced, src_enhanced,
-                                      key_padding_mask=src_key_padding_mask,
-                                      attn_mask=src_mask)
-        out1 = src + self.dropout1(sa_output) # اتصال باقیمانده با src اصلی
-        out1 = self.norm1(out1)
-        ff_output = self.linear2(self.dropout(self.activation(self.linear1(out1))))
-        out2 = out1 + self.dropout2(ff_output)
-        out2 = self.norm2(out2)
-        return out2
+        src2 = self.norm1(src)
+        sa_output, _ = self.self_attn(src2, src2, src2,
+                                    attn_mask=src_mask,
+                                    key_padding_mask=src_key_padding_mask)
+        src = src + self.dropout1(sa_output)
+        
+        src2 = self.norm2(src)
+        ff_output = self.linear2(self.dropout(self.activation(self.linear1(src2))))
+        src = src + self.dropout2(ff_output)
+        return src
 
-# -------------- 4. انکودر ترانسفورمر آگاه از هدف --------------
 class TargetAwareTransformerEncoder(Module):
     def __init__(self, encoder_layer, num_layers, norm=None):
         super(TargetAwareTransformerEncoder, self).__init__()
@@ -142,25 +117,30 @@ class TargetAwareTransformerEncoder(Module):
     def forward(self, src, candidate_embeddings_global, mask=None, src_key_padding_mask=None):
         output = src
         for mod in self.layers:
-            output = mod(output, candidate_embeddings_global, src_mask=mask, src_key_padding_mask=src_key_padding_mask)
+            output = mod(output, candidate_embeddings_global, 
+                        src_mask=mask, 
+                        src_key_padding_mask=src_key_padding_mask)
         if self.norm is not None:
             output = self.norm(output)
         return output
 
-# -------------- 5. کلاس SessionGraph --------------
 class SessionGraph(Module):
     def __init__(self, opt, n_node):
         super(SessionGraph, self).__init__()
         self.hidden_size = opt.hiddenSize
         self.n_node = n_node
-        # self.batch_size = opt.batchSize # این ویژگی دیگر مستقیماً در تابع train_test استفاده نمی‌شود
         self.nonhybrid = opt.nonhybrid
-        self.embedding = nn.Embedding(self.n_node, self.hidden_size, padding_idx=0)
-        self.gnn = GNN(self.hidden_size, step=opt.step)
         self.ssl_weight = opt.ssl_weight
         self.ssl_temp = opt.ssl_temp
         self.ssl_dropout_rate = opt.ssl_dropout_rate
-        self.pos_encoder = PositionalEncoding(self.hidden_size, getattr(opt, 'dropout', 0.1), max_len=5000)
+        
+        # Initialize embeddings
+        self.embedding = nn.Embedding(self.n_node, self.hidden_size, padding_idx=0)
+        
+        # Initialize modules
+        self.gnn = GNN(self.hidden_size, step=opt.step)
+        self.pos_encoder = PositionalEncoding(self.hidden_size, getattr(opt, 'dropout', 0.1))
+        
         ta_encoder_layer = TargetAwareEncoderLayer(
             d_model=self.hidden_size,
             nhead=getattr(opt, 'nhead', 2),
@@ -172,14 +152,19 @@ class SessionGraph(Module):
             num_layers=getattr(opt, 'nlayers', 2),
             norm=nn.LayerNorm(self.hidden_size)
         )
+        
+        # Prediction layers
         self.linear_one = nn.Linear(self.hidden_size, self.hidden_size, bias=True)
         self.linear_two = nn.Linear(self.hidden_size, self.hidden_size, bias=True)
         self.linear_three = nn.Linear(self.hidden_size, 1, bias=False)
         self.linear_transform = nn.Linear(self.hidden_size * 2, self.hidden_size, bias=True)
         self.linear_t = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
+        
+        # Optimization
         self.loss_function = nn.CrossEntropyLoss()
         self.optimizer = torch.optim.Adam(self.parameters(), lr=opt.lr, weight_decay=opt.l2)
         self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=opt.lr_dc_step, gamma=opt.lr_dc)
+        
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -189,256 +174,193 @@ class SessionGraph(Module):
                 nn.init.xavier_uniform_(weight)
             else:
                 nn.init.uniform_(weight, -stdv, stdv)
-        nn.init.uniform_(self.embedding.weight, -stdv, stdv)
-        if self.embedding.padding_idx is not None:
-             with torch.no_grad():
-                  self.embedding.weight[self.embedding.padding_idx].fill_(0)
+        
+        with torch.no_grad():
+            self.embedding.weight[self.embedding.padding_idx].fill_(0)
 
     def compute_scores(self, hidden_transformer_output, mask):
-        device = hidden_transformer_output.device
-        batch_size = hidden_transformer_output.size(0)
-        sequence_lengths = torch.sum(mask.float(), 1).long()
-        ht = torch.zeros(batch_size, self.hidden_size, device=device)
-        valid_lengths_mask = sequence_lengths > 0
-        if valid_lengths_mask.any():
-            gather_indices = (sequence_lengths[valid_lengths_mask] - 1).clamp(min=0)
-            batch_indices_ht = torch.arange(batch_size, device=device)[valid_lengths_mask]
-            if hidden_transformer_output.size(1) > 0 :
-                 ht[valid_lengths_mask] = hidden_transformer_output[batch_indices_ht, gather_indices]
-
-        q1 = self.linear_one(ht).view(batch_size, 1, self.hidden_size)
+        mask = mask.float()
+        seq_len = hidden_transformer_output.size(1)
+        
+        # Get last valid item
+        ht = hidden_transformer_output[torch.arange(mask.size(0)), 
+                                      torch.clamp(mask.sum(1) - 1, min=0)]
+        
+        # Attention mechanism
+        q1 = self.linear_one(ht).unsqueeze(1)
         q2 = self.linear_two(hidden_transformer_output)
-        mask_expanded_alpha = mask.unsqueeze(-1).float()
-        alpha_logits = self.linear_three(torch.sigmoid(q1 + q2))
-        if hidden_transformer_output.size(1) == 0 and mask_expanded_alpha.size(1) > 0 : # حالت خاص اگر توالی ورودی خالی باشد
-             alpha_logits_masked = alpha_logits
-        else:
-            alpha_logits_masked = alpha_logits.masked_fill(mask_expanded_alpha == 0, -float('inf'))
-        alpha = F.softmax(alpha_logits_masked, dim=1)
-
-        if alpha.size(1) == hidden_transformer_output.size(1) and hidden_transformer_output.size(1) > 0:
-             a = torch.sum(alpha * hidden_transformer_output * mask_expanded_alpha, 1)
-        elif hidden_transformer_output.size(1) == 0 : # اگر توالی ورودی خالی باشد
-             a = torch.zeros(batch_size, self.hidden_size, device=device)
-        else: # حالت عدم تطابق ابعاد (نباید رخ دهد)
-            a = torch.zeros(batch_size, self.hidden_size, device=device)
-
-        candidate_embeds = self.embedding.weight[1:] # از قبل روی دستگاه مدل است
-
+        alpha_logits = self.linear_three(torch.sigmoid(q1 + q2)).squeeze(-1)
+        
+        # Masked softmax
+        alpha_logits_masked = alpha_logits.masked_fill(mask == 0, -1e9)
+        alpha = torch.softmax(alpha_logits_masked, dim=1)
+        
+        # Weighted sum
+        a = (alpha.unsqueeze(-1) * hidden_transformer_output * mask.unsqueeze(-1)).sum(1)
+        
+        # Get candidate embeddings
+        candidate_embeds = self.embedding.weight[1:]  # exclude padding
+        
         if self.nonhybrid:
-            combined_preference = self.linear_transform(torch.cat([a, ht], 1))
-            scores = torch.matmul(combined_preference, candidate_embeds.t())
+            combined = self.linear_transform(torch.cat([a, ht], 1))
+            scores = torch.matmul(combined, candidate_embeds.t())
         else:
-            mask_expanded_beta = mask.unsqueeze(-1).float()
-            if hidden_transformer_output.size(1) > 0:
-                 hidden_masked_for_qt = hidden_transformer_output * mask_expanded_beta
-                 qt = self.linear_t(hidden_masked_for_qt)
-            else: # اگر توالی ورودی خالی باشد
-                 qt = torch.zeros_like(hidden_transformer_output, device=device)
-
-            if qt.size(1) > 0: # اگر qt (و در نتیجه hidden_transformer_output) آیتم داشته باشد
-                 beta_logits = torch.matmul(candidate_embeds, qt.transpose(1, 2))
-                 beta_mask = mask.unsqueeze(1)
-                 beta_logits_masked = beta_logits.masked_fill(beta_mask == 0, -float('inf'))
-                 beta = F.softmax(beta_logits_masked, dim=-1)
-                 target_ctx = torch.matmul(beta, qt * mask_expanded_beta) # qt از قبل با ماسک ضرب شده
-            else: # اگر qt خالی باشد
-                 target_ctx = torch.zeros(batch_size, candidate_embeds.size(0), self.hidden_size, device=device)
+            qt = self.linear_t(hidden_transformer_output)
+            beta_logits = torch.matmul(candidate_embeds, qt.transpose(1, 2))
+            beta_logits_masked = beta_logits.masked_fill(mask.unsqueeze(1) == 0, -1e9)
+            beta = torch.softmax(beta_logits_masked, dim=-1)
+            
+            target_ctx = torch.matmul(beta, qt * mask.unsqueeze(-1))
             final_representation = a.unsqueeze(1) + target_ctx
             scores = torch.sum(final_representation * candidate_embeds.unsqueeze(0), dim=-1)
+        
         return scores
 
     def calculate_ssl_loss(self, emb1, emb2, temperature):
         emb1 = F.normalize(emb1, p=2, dim=1)
         emb2 = F.normalize(emb2, p=2, dim=1)
+        
         sim_matrix_12 = torch.matmul(emb1, emb2.t()) / temperature
         log_softmax_12 = F.log_softmax(sim_matrix_12, dim=1)
         loss_12 = -torch.diag(log_softmax_12)
+        
         sim_matrix_21 = torch.matmul(emb2, emb1.t()) / temperature
         log_softmax_21 = F.log_softmax(sim_matrix_21, dim=1)
         loss_21 = -torch.diag(log_softmax_21)
-        ssl_loss = (loss_12.mean() + loss_21.mean()) / 2.0
-        return ssl_loss
+        
+        return (loss_12.mean() + loss_21.mean()) / 2.0
 
-# -------------- تابع forward کلی (اصلاح شده برای انتقال بهینه داده) --------------
 def forward(model, i, data, is_train=True):
-    # data.get_slice() آرایه‌های NumPy برمی‌گرداند
     alias_inputs_np, A_np, items_np, mask_np, targets_np = data.get_slice(i)
-
-    # دستگاه هدف از مدل گرفته می‌شود (مدل باید از قبل به GPU منتقل شده باشد)
-    target_device = next(model.parameters()).device
-
-    # تبدیل آرایه‌های NumPy به تنسورهای PyTorch و انتقال مستقیم به دستگاه هدف
-    # non_blocking=True برای انتقال ناهمزمان در صورت استفاده از حافظه پین شده CPU مفید است
-    is_cuda_device = target_device.type == 'cuda'
-    alias_inputs = torch.from_numpy(alias_inputs_np).long().to(target_device, non_blocking=is_cuda_device)
-    A_gnn = torch.from_numpy(A_np).float().to(target_device, non_blocking=is_cuda_device)
-    items_gnn_input = torch.from_numpy(items_np).long().to(target_device, non_blocking=is_cuda_device)
-    # mask_np از utils.py به صورت float32 می‌آید، اینجا به long تبدیل می‌شود.
-    # اگر به عنوان ماسک بولی استفاده می‌شود، .bool() ممکن است مناسب‌تر باشد، اما long هم برای مقایسه با 0 کار می‌کند.
-    mask_seq = torch.from_numpy(mask_np).long().to(target_device, non_blocking=is_cuda_device)
-    targets_final = torch.from_numpy(targets_np).long().to(target_device, non_blocking=is_cuda_device)
-
-    # --- بقیه عملیات روی GPU انجام خواهد شد ---
-    hidden_emb = model.embedding(items_gnn_input)
-    if torch.isnan(hidden_emb).any() or torch.isinf(hidden_emb).any():
-        hidden_emb = torch.nan_to_num(hidden_emb)
-
-    hidden_gnn = model.gnn(A_gnn, hidden_emb) # A_gnn و hidden_emb روی GPU هستند
-    if torch.isnan(hidden_gnn).any() or torch.isinf(hidden_gnn).any():
-        hidden_gnn = torch.nan_to_num(hidden_gnn)
-
-    batch_size_fwd, _ = alias_inputs.shape
-
-    clamped_alias_inputs = alias_inputs.clamp(0, hidden_gnn.size(1) - 1)
-    alias_expanded_for_gather = clamped_alias_inputs.unsqueeze(-1).expand(-1, -1, model.hidden_size)
-    seq_hidden_gnn = torch.gather(hidden_gnn, 1, alias_expanded_for_gather)
-
-    seq_hidden_pos = model.pos_encoder(seq_hidden_gnn)
-    src_key_padding_mask = (mask_seq == 0)
-    candidate_embeds_global = model.embedding.weight[1:] # از قبل روی target_device است
-
-    hidden_transformer_output = model.transformer_encoder(
-        src=seq_hidden_pos,
-        candidate_embeddings_global=candidate_embeds_global,
+    device = next(model.parameters()).device
+    
+    # Convert to tensors and move to device
+    alias_inputs = torch.from_numpy(alias_inputs_np).long().to(device)
+    A = torch.from_numpy(A_np).float().to(device)
+    items = torch.from_numpy(items_np).long().to(device)
+    mask = torch.from_numpy(mask_np).float().to(device)
+    targets = torch.from_numpy(targets_np).long().to(device)
+    
+    # Forward pass through GNN
+    hidden = model.embedding(items)
+    hidden = model.gnn(A, hidden)
+    
+    # Prepare sequence input for transformer
+    seq_hidden = torch.gather(hidden, 1, 
+                             alias_inputs.unsqueeze(-1).expand(-1, -1, model.hidden_size))
+    
+    # Add positional encoding
+    seq_hidden = model.pos_encoder(seq_hidden)
+    
+    # Transformer encoder
+    src_key_padding_mask = (mask == 0)
+    output = model.transformer_encoder(
+        src=seq_hidden,
+        candidate_embeddings_global=model.embedding.weight[1:],
         src_key_padding_mask=src_key_padding_mask
     )
-
-    scores = model.compute_scores(hidden_transformer_output, mask_seq)
-
-    ssl_loss = torch.tensor(0.0, device=scores.device) # ایجاد روی همان دستگاه scores
+    
+    # Compute scores
+    scores = model.compute_scores(output, mask)
+    
+    # SSL loss (optional)
+    ssl_loss = torch.tensor(0.0, device=device)
     if is_train and model.ssl_weight > 0:
         try:
-            sequence_lengths_ssl = torch.sum(mask_seq.float(), 1).long()
-            batch_indices_ssl = torch.arange(batch_size_fwd, device=alias_inputs.device)
-            valid_lengths_mask_ssl = sequence_lengths_ssl > 0
-            last_item_node_indices_in_gnn = torch.zeros(batch_size_fwd, dtype=torch.long, device=alias_inputs.device)
-
-            if valid_lengths_mask_ssl.any():
-                 last_valid_seq_indices = (sequence_lengths_ssl[valid_lengths_mask_ssl] - 1).clamp(min=0)
-                 last_item_node_indices_in_gnn[valid_lengths_mask_ssl] = alias_inputs[batch_indices_ssl[valid_lengths_mask_ssl], last_valid_seq_indices]
-
-            clamped_last_item_node_indices = last_item_node_indices_in_gnn.clamp(0, hidden_gnn.size(1) - 1)
-            ssl_base_emb = torch.zeros(batch_size_fwd, model.hidden_size, device=hidden_gnn.device)
-            if valid_lengths_mask_ssl.any() and hidden_gnn.size(1) > 0: # اطمینان از اینکه hidden_gnn خالی نیست
-                ssl_base_emb[valid_lengths_mask_ssl] = hidden_gnn[batch_indices_ssl[valid_lengths_mask_ssl], clamped_last_item_node_indices[valid_lengths_mask_ssl]]
-
+            # Get last valid item embeddings
+            last_idx = torch.clamp(mask.sum(1) - 1, min=0)
+            ssl_base_emb = hidden[torch.arange(mask.size(0)), last_idx]
+            
+            # Create two views with dropout
             ssl_emb1 = F.dropout(ssl_base_emb, p=model.ssl_dropout_rate, training=True)
             ssl_emb2 = F.dropout(ssl_base_emb, p=model.ssl_dropout_rate, training=True)
+            
             ssl_loss = model.calculate_ssl_loss(ssl_emb1, ssl_emb2, model.ssl_temp)
-
-            if torch.isnan(ssl_loss).any() or torch.isinf(ssl_loss).any():
-                 ssl_loss = torch.tensor(0.0, device=scores.device)
         except Exception as e:
-             print(f"Error during SSL calculation for batch slice {i}: {e}")
-             ssl_loss = torch.tensor(0.0, device=scores.device)
+            print(f"SSL calculation error: {e}")
+            ssl_loss = torch.tensor(0.0, device=device)
+    
+    return targets, scores, ssl_loss
 
-    return targets_final, scores, ssl_loss
-
-
-# -------------- تابع آموزش و تست (اصلاح شده برای استفاده از opt.batchSize) --------------
-def train_test(model, train_data, test_data, opt): # opt به عنوان آرگومان به تابع اضافه شده است
+def train_test(model, train_data, test_data, opt):
     scaler = GradScaler(enabled=torch.cuda.is_available())
-
-    # گرفتن زمان شروع آموزش به وقت ایران
-    now_utc_train_start = datetime.datetime.now(datetime.timezone.utc)
-    now_ir_train_start = now_utc_train_start.astimezone(IR_TIMEZONE)
-    print(f'start training: {now_ir_train_start.strftime("%Y-%m-%d %H:%M:%S ")}')
-
+    
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    now_ir = now_utc.astimezone(IR_TIMEZONE)
+    print(f'start training: {now_ir.strftime("%Y-%m-%d %H:%M:%S")}')
+    
     model.train()
     total_loss = 0.0
     total_rec_loss = 0.0
     total_ssl_loss = 0.0
-    # استفاده از opt.batchSize به جای model.batch_size برای جلوگیری از خطا
+    
     slices = train_data.generate_batch(opt.batchSize)
-
-    for step, i_slice in enumerate(slices):
-        model.optimizer.zero_grad(set_to_none=True) # بهینه‌سازی جزئی برای حافظه
-
+    for step, i in enumerate(slices):
+        model.optimizer.zero_grad(set_to_none=True)
+        
         with autocast(enabled=torch.cuda.is_available()):
-            # تابع forward داده‌ها را به دستگاه مدل منتقل می‌کند
-            targets, scores, ssl_loss_val = forward(model, i_slice, train_data, is_train=True)
-
-            # targets و scores از قبل روی دستگاه صحیح هستند
-            valid_targets_mask = (targets > 0) & (targets <= model.n_node)
-            rec_loss = torch.tensor(0.0, device=scores.device) # ایجاد روی همان دستگاه scores
-
-            if valid_targets_mask.sum() > 0:
-                 # n_node-1 چون آیتم 0 (پدینگ) در امتیازات کاندیدا نیست
-                 if scores.shape[1] == model.n_node - 1:
-                      try:
-                           # targets از 1 شروع می‌شوند، اندیس‌ها برای loss باید از 0 باشند
-                           target_values_for_loss = (targets[valid_targets_mask] - 1).clamp(0, scores.shape[1] - 1)
-                           rec_loss = model.loss_function(scores[valid_targets_mask], target_values_for_loss)
-                      except IndexError:
-                            # اگر خطای اندیس رخ داد (نباید اتفاق بیفتد با clamp)، rec_loss صفر باقی می‌ماند
-                            pass
-            loss = rec_loss + model.ssl_weight * ssl_loss_val
-            if torch.isnan(loss).any() or torch.isinf(loss).any():
-                 # print(f"Warning: NaN/Inf detected in total loss for training slice {step}. Skipping batch.")
-                 continue # از این بچ صرف نظر کن
-
-        # backward و step باید خارج از autocast باشند یا با scaler مدیریت شوند
+            targets, scores, ssl_loss = forward(model, i, train_data, is_train=True)
+            
+            # Calculate recommendation loss
+            valid_targets = (targets > 0) & (targets <= model.n_node)
+            rec_loss = torch.tensor(0.0, device=scores.device)
+            
+            if valid_targets.any():
+                target_values = (targets[valid_targets] - 1).clamp(0, scores.size(1) - 1)
+                rec_loss = model.loss_function(scores[valid_targets], target_values)
+            
+            total_loss_val = rec_loss + model.ssl_weight * ssl_loss
+        
+        # Backward pass
         if torch.cuda.is_available():
-             scaler.scale(loss).backward()
-             scaler.step(model.optimizer)
-             scaler.update()
+            scaler.scale(total_loss_val).backward()
+            scaler.step(model.optimizer)
+            scaler.update()
         else:
-             loss.backward()
-             model.optimizer.step()
-
-        total_loss += loss.item() # .item() برای گرفتن مقدار عددی از تنسور تک عنصری
+            total_loss_val.backward()
+            model.optimizer.step()
+        
+        # Update statistics
+        total_loss += total_loss_val.item()
         total_rec_loss += rec_loss.item()
-        total_ssl_loss += ssl_loss_val.item()
-
-        if (step + 1) % max(1, int(len(slices) / 5)) == 0: # لاگ حدود 5 بار
-             avg_loss = total_loss / (step + 1)
-             avg_rec_loss = total_rec_loss / (step + 1)
-             avg_ssl_loss = total_ssl_loss / (step + 1)
-             print(f'[{step + 1}/{len(slices)}] Tot Loss: {avg_loss:.4f}, Rec Loss: {avg_rec_loss:.4f}, SSL Loss: {avg_ssl_loss:.4f}')
-
+        total_ssl_loss += ssl_loss.item()
+        
+        if (step + 1) % max(1, int(len(slices) / 5)) == 0:
+            avg_loss = total_loss / (step + 1)
+            avg_rec_loss = total_rec_loss / (step + 1)
+            avg_ssl_loss = total_ssl_loss / (step + 1)
+            print(f'[{step + 1}/{len(slices)}] Tot Loss: {avg_loss:.4f}, Rec Loss: {avg_rec_loss:.4f}, SSL Loss: {avg_ssl_loss:.4f}')
+    
     model.scheduler.step()
-    len_slices_val = len(slices) if slices else 1 # جلوگیری از تقسیم بر صفر
-    print(f'\tAvg Loss:\t{total_loss / len_slices_val:.4f}')
-    print(f'\tAvg Rec Loss:\t{total_rec_loss / len_slices_val:.4f}')
-    print(f'\tAvg SSL Loss:\t{total_ssl_loss / len_slices_val:.4f}')
-
-    # گرفتن زمان شروع پیش‌بینی به وقت ایران
-    now_utc_predict_start = datetime.datetime.now(datetime.timezone.utc)
-    now_ir_predict_start = now_utc_predict_start.astimezone(IR_TIMEZONE)
-    print(f'start predicting: {now_ir_predict_start.strftime("%Y-%m-%d %H:%M:%S ")}')
-
+    
+    # Evaluation
     model.eval()
     hit, mrr, precision = [], [], []
-    k_metric = 20 # برای Recall@20, MRR@20, Precision@20
-
-    # استفاده از opt.batchSize در اینجا هم برای سازگاری
-    test_slices_eval = test_data.generate_batch(opt.batchSize)
-    with torch.no_grad(): # اطمینان از غیرفعال بودن محاسبه گرادیان
-        for k_slice_eval in test_slices_eval:
-            targets, scores, _ = forward(model, k_slice_eval, test_data, is_train=False)
-            # topk روی GPU انجام می‌شود
-            _, sub_scores_indices = scores.topk(k_metric, dim=1) # _ برای مقادیر امتیازات که لازم نیستند
-
-            # انتقال به CPU فقط برای محاسبات NumPy
-            sub_scores_indices_cpu = sub_scores_indices.cpu().numpy()
-            targets_cpu = targets.cpu().numpy()
-
-            for score_idx_list, target_item_id in zip(sub_scores_indices_cpu, targets_cpu):
-                 if target_item_id > 0: # فقط اهداف معتبر (غیر پدینگ)
-                    target_item_id_zero_based = target_item_id - 1 # تبدیل به اندیس 0 پایه
-                    is_hit = np.isin(target_item_id_zero_based, score_idx_list)
-                    hit.append(is_hit)
-                    if is_hit:
-                        # اگر is_hit درست است، آیتم قطعاً در لیست است
-                        rank = np.where(score_idx_list == target_item_id_zero_based)[0][0] + 1
+    k_metric = 20
+    
+    test_slices = test_data.generate_batch(opt.batchSize)
+    with torch.no_grad():
+        for i in test_slices:
+            targets, scores, _ = forward(model, i, test_data, is_train=False)
+            _, indices = scores.topk(k_metric, dim=1)
+            
+            indices = indices.cpu().numpy()
+            targets = targets.cpu().numpy()
+            
+            for pred, target in zip(indices, targets):
+                if target > 0:
+                    target_idx = target - 1
+                    hit.append(np.isin(target_idx, pred))
+                    if hit[-1]:
+                        rank = np.where(pred == target_idx)[0][0] + 1
                         mrr.append(1.0 / rank)
                         precision.append(1.0 / k_metric)
                     else:
                         mrr.append(0.0)
                         precision.append(0.0)
-
+    
     hit_rate = np.mean(hit) * 100 if hit else 0.0
     mrr_score = np.mean(mrr) * 100 if mrr else 0.0
     precision_score = np.mean(precision) * 100 if precision else 0.0
+    
     return hit_rate, mrr_score, precision_score
