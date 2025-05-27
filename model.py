@@ -192,7 +192,7 @@ class SessionGraph(Module):
         alpha_logits = self.linear_three(torch.sigmoid(q1 + q2)).squeeze(-1)
         
         # Masked softmax
-        alpha_logits_masked = alpha_logits.masked_fill(mask == 0, -1e9)
+        alpha_logits_masked = alpha_logits.masked_fill(mask == 0, torch.finfo(alpha_logits.dtype).min)
         alpha = torch.softmax(alpha_logits_masked, dim=1)
         
         # Weighted sum
@@ -207,7 +207,7 @@ class SessionGraph(Module):
         else:
             qt = self.linear_t(hidden_transformer_output)
             beta_logits = torch.matmul(candidate_embeds, qt.transpose(1, 2))
-            beta_logits_masked = beta_logits.masked_fill(mask.unsqueeze(1) == 0, -1e9)
+            beta_logits_masked = beta_logits.masked_fill(mask.unsqueeze(1) == 0, torch.finfo(beta_logits.dtype).min)
             beta = torch.softmax(beta_logits_masked, dim=-1)
             
             target_ctx = torch.matmul(beta, qt * mask.unsqueeze(-1))
