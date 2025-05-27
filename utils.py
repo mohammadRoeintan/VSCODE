@@ -1,66 +1,62 @@
+# utils.py
+
 import numpy as np
 import torch
 # import networkx as nx # اگر برای ساخت گراف کلی استفاده می‌شد، لازم بود
 
-# تابع build_graph در کد شما به نظر می‌رسد که برای ساخت یک گراف کلی از تمام sessionها در ابتدای کار است.
-# اما در پیاده‌سازی فعلی، گراف‌ها به صورت پویا برای هر بچ در Data.get_slice ساخته می‌شوند.
-# بنابراین، این تابع build_graph اگر در main فراخوانی نشود، عملاً استفاده نمی‌شود.
-# آن را برای کامل بودن اینجا می‌آوریم، اما در main.py فعلی فراخوانی نمی‌شود.
-def build_graph_global(all_sessions_items):
+def normalize_adj_symmetric(adj):
+    """Symmetrically normalize adjacency matrix."""
+    # افزودن یال به خود (self-loops)
+    adj = adj + np.eye(adj.shape[0])
+    rowsum = np.array(adj.sum(1))
+    d_inv_sqrt = np.power(rowsum, -0.5).flatten()
+    d_inv_sqrt[np.isinf(d_inv_sqrt)] = 0.
+    d_mat_inv_sqrt = np.diag(d_inv_sqrt)
+    return adj.dot(d_mat_inv_sqrt).transpose().dot(d_mat_inv_sqrt)
+
+def build_graph_global(all_sessions_items, n_node):
     """
-    Builds global adjacency matrices from all unique session items if needed.
-    Note: Current model builds graph per batch in Data.get_slice.
+    Builds a global adjacency matrix from all session items and normalizes it.
+    Returns a single normalized adjacency matrix (sparse if possible in future).
     """
     if not all_sessions_items:
         print("Warning: Trying to build global graph from empty session list.")
-        return np.zeros((1, 1), dtype=np.float32), np.zeros((1, 1), dtype=np.float32)
+        adj = np.zeros((n_node, n_node), dtype=np.float32)
+        # برای گراف خالی هم یال به خود اضافه می‌کنیم تا نرمال‌سازی خطا ندهد
+        np.fill_diagonal(adj, 1) # یا حداقل یک یال به خود برای نود 0 اگر n_node > 0
+        return normalize_adj_symmetric(adj)
 
-    unique_nodes = set()
-    for session in all_sessions_items:
-        for item_wrapper in session:
-            item = item_wrapper[0] if isinstance(item_wrapper, list) and item_wrapper else item_wrapper
-            if isinstance(item, int) and item > 0: # آیتم 0 معمولا پدینگ است
-                unique_nodes.add(item)
 
-    if not unique_nodes:
-        print("Warning: No valid nodes found to build global graph.")
-        return np.zeros((1, 1), dtype=np.float32), np.zeros((1, 1), dtype=np.float32)
-
-    n_node = max(unique_nodes) + 1 # +1 برای اندیس‌گذاری از 0
-
-    adj_in_counts = {i: {} for i in range(n_node)}
-    adj_out_counts = {i: {} for i in range(n_node)}
+    # ساخت ماتریس همسایگی خام (فقط ارتباطات بین آیتم‌های مختلف در یک سشن)
+    # در اینجا از یک ماتریس همسایگی ساده استفاده می‌کنیم که اگر آیتم i و j پشت سر هم آمده باشند، یک یال داریم
+    # برای سادگی، جهت را در نظر نمی‌گیریم و یک گراف غیر جهت‌دار می‌سازیم.
+    # TAGNN ممکن است از روش پیچیده‌تری برای ساخت گراف گلوبال استفاده کند (مثلا مبتنی بر هم‌رخدادی کلی).
+    # این یک پیاده‌سازی پایه است.
+    adj_raw = np.zeros((n_node, n_node), dtype=np.float32)
 
     for session_items in all_sessions_items:
-        # تبدیل آیتم‌ها به int و فیلتر کردن None یا مقادیر غیر عددی
         cleaned_session = []
         for item_wrapper in session_items:
             item_val = item_wrapper[0] if isinstance(item_wrapper, list) and item_wrapper else item_wrapper
-            if isinstance(item_val, int) and item_val > 0 and item_val < n_node:
+            if isinstance(item_val, int) and 0 < item_val < n_node: # آیتم 0 پدینگ است
                 cleaned_session.append(item_val)
 
         for i in range(len(cleaned_session) - 1):
             u, v = cleaned_session[i], cleaned_session[i+1]
-            # u, v باید از قبل int و در محدوده باشند
-            adj_out_counts[u][v] = adj_out_counts[u].get(v, 0) + 1
-            adj_in_counts[v][u] = adj_in_counts[v].get(u, 0) + 1
+            # برای گراف غیر جهت‌دار
+            adj_raw[u, v] = 1.0
+            adj_raw[v, u] = 1.0 # اگر می‌خواهید گراف جهت‌دار باشد، این خط را حذف کنید
 
-    adj_in = np.zeros((n_node, n_node), dtype=np.float32)
-    adj_out = np.zeros((n_node, n_node), dtype=np.float32)
-
-    for u, neighbors in adj_out_counts.items():
-        out_degree = sum(neighbors.values())
-        if out_degree > 0:
-            for v, count in neighbors.items():
-                adj_out[u, v] = count / out_degree
-
-    for v, neighbors in adj_in_counts.items():
-        in_degree = sum(neighbors.values())
-        if in_degree > 0:
-            for u, count in neighbors.items():
-                adj_in[v, u] = count / in_degree
-
-    return adj_in, adj_out
+    print(f"Global graph: Found {np.sum(adj_raw > 0) / 2:.0f} unique edges from sessions.")
+    
+    # نرمال‌سازی ماتریس همسایگی
+    # توجه: اگر n_node بسیار بزرگ باشد، این ماتریس چگال می‌تواند مشکل‌ساز شود.
+    # در آن صورت باید از ماتریس‌های پراکنده (sparse) استفاده کرد.
+    normalized_adj = normalize_adj_symmetric(adj_raw)
+    
+    # در این پیاده‌سازی ساده، adj_in و adj_out گلوبال یکی هستند (ماتریس نرمال شده غیر جهت‌دار)
+    # اگر نیاز به adj_in و adj_out جداگانه برای گراف گلوبال دارید، باید منطق ساخت و نرمال‌سازی را گسترش دهید.
+    return normalized_adj
 
 
 def data_masks(all_usr_pois, item_tail=0):
@@ -69,74 +65,56 @@ def data_masks(all_usr_pois, item_tail=0):
     all_usr_pois: list of sessions, where each session is a list of item IDs.
     item_tail: value used for padding (usually 0).
     """
-    if not all_usr_pois: # اگر لیست sessionها خالی باشد
-        # برگرداندن تنسورهای خالی با ابعاد مناسب برای جلوگیری از خطا در ادامه
-        # (0,0) برای توالی‌ها و ماسک‌ها، 0 برای max_len
-        # ماسک به صورت bool برگردانده می‌شود
+    if not all_usr_pois:
         return torch.empty((0, 0), dtype=torch.long), torch.empty((0, 0), dtype=torch.bool), 0
 
-    us_lens = [len(upois) for upois in all_usr_pois if upois] # طول sessionهای غیرخالی
-    if not us_lens: # اگر همه sessionها خالی باشند
+    us_lens = [len(upois) for upois in all_usr_pois if upois]
+    if not us_lens:
         max_len = 0
     else:
         max_len = max(us_lens)
 
-    if max_len == 0: # اگر همه sessionها خالی هستند یا تنها session خالی وجود دارد
+    if max_len == 0:
         num_sessions = len(all_usr_pois)
-        # برگرداندن تنسورهای پد شده با طول صفر برای هر session
-        # ماسک به صورت bool برگردانده می‌شود
         return torch.zeros((num_sessions, 0), dtype=torch.long), torch.zeros((num_sessions, 0), dtype=torch.bool), 0
 
     us_pois_padded = []
-    us_msks = [] # برای ماسک از نوع bool استفاده می‌کنیم
+    us_msks = []
 
     for upois_original in all_usr_pois:
-        # پاکسازی session: تبدیل همه آیتم‌ها به int و حذف None یا مقادیر نامعتبر
         cleaned_upois = []
-        if upois_original: # اگر session اصلی خالی نباشد
+        if upois_original:
             for item_wrapper in upois_original:
-                # آیتم‌ها ممکن است int یا list تک عنصری باشند
                 item = item_wrapper[0] if isinstance(item_wrapper, list) and item_wrapper else item_wrapper
-                if isinstance(item, (int, float)) and not np.isnan(item): # تبدیل float به int و بررسی NaN
+                if isinstance(item, (int, float)) and not np.isnan(item):
                     cleaned_upois.append(int(item))
-                # elif isinstance(item, str) and item.isdigit(): # اگر آیتم‌ها به صورت رشته عددی باشند
-                #     cleaned_upois.append(int(item))
 
         padding_len = max_len - len(cleaned_upois)
         padded_seq = cleaned_upois + [item_tail] * padding_len
         us_pois_padded.append(padded_seq)
 
-        # ایجاد ماسک به صورت bool
         mask = [True] * len(cleaned_upois) + [False] * padding_len
         us_msks.append(mask)
 
     try:
-        # ایجاد تنسورها مستقیماً با نوع داده نهایی
         us_pois_tensor = torch.tensor(us_pois_padded, dtype=torch.long)
-        us_msks_tensor = torch.tensor(us_msks, dtype=torch.bool) # استفاده از bool برای ماسک
+        us_msks_tensor = torch.tensor(us_msks, dtype=torch.bool)
     except Exception as e:
         print("Error in tensor conversion (data_masks):")
         print(f"Max length: {max_len}")
         print(f"Number of sequences to pad: {len(all_usr_pois)}")
-        # for i, seq_orig in enumerate(all_usr_pois):
-        #     seq_pad = us_pois_padded[i]
-        #     # print(f"Original seq {i} (len {len(seq_orig if seq_orig else [])}): {seq_orig}")
-        #     # print(f"Padded seq {i} (len {len(seq_pad)}): {seq_pad}")
-        #     if len(seq_pad) != max_len:
-        #          print(f"Inconsistent padded length at index {i}: expected {max_len}, got {len(seq_pad)}")
-        raise e # ارسال مجدد خطا برای بررسی بیشتر
+        raise e
 
     return us_pois_tensor, us_msks_tensor, max_len
 
 
 def split_validation(train_set_original, valid_portion):
-    # train_set_original باید یک تاپل (sessions, targets) باشد
     if not (isinstance(train_set_original, tuple) and len(train_set_original) == 2):
         raise ValueError("train_set for split_validation must be a tuple of (sessions, targets)")
 
     train_set_x, train_set_y = train_set_original
 
-    if not train_set_x: # اگر لیست sessionها خالی باشد
+    if not train_set_x:
         print("Warning: train_set_x is empty in split_validation. Returning empty sets.")
         return ([], []), ([], [])
 
@@ -148,7 +126,6 @@ def split_validation(train_set_original, valid_portion):
     np.random.shuffle(sidx)
 
     n_train = int(np.round(n_samples * (1. - valid_portion)))
-    # اطمینان از اینکه n_train در محدوده معتبر است
     n_train = max(0, min(n_samples, n_train))
 
     valid_set_x = [train_set_x[s] for s in sidx[n_train:]]
@@ -160,8 +137,7 @@ def split_validation(train_set_original, valid_portion):
 
 
 class Data():
-    def __init__(self, data_tuple, shuffle=False, graph=None): # پارامتر graph استفاده نمی‌شود
-         # data_tuple باید (list_of_sessions, list_of_targets) باشد
+    def __init__(self, data_tuple, shuffle=False, graph=None):
          if not isinstance(data_tuple, tuple) or len(data_tuple) != 2:
               raise ValueError("Input data for Data class must be a tuple of (sessions, targets)")
 
@@ -170,36 +146,25 @@ class Data():
          if len(inputs_raw) != len(targets_raw):
               raise ValueError(f"Number of sessions ({len(inputs_raw)}) does not match number of targets ({len(targets_raw)})")
 
-         # پاکسازی اولیه targets_raw برای اطمینان از اینکه همه int هستند (اگر لازم باشد)
          cleaned_targets_raw = []
          for t_wrapper in targets_raw:
              t = t_wrapper[0] if isinstance(t_wrapper, list) and t_wrapper else t_wrapper
              if isinstance(t, (int, float)) and not np.isnan(t):
                  cleaned_targets_raw.append(int(t))
-             # elif isinstance(t, str) and t.isdigit():
-             #     cleaned_targets_raw.append(int(t))
              else:
-                 # اگر تارگت نامعتبر است، یک مقدار پیش‌فرض (مثلا 0) یا خطا
-                 cleaned_targets_raw.append(0) # یا raise ValueError
+                 cleaned_targets_raw.append(0)
 
-         # data_masks حالا تنسورهای PyTorch برمی‌گرداند
          inputs_tensor, mask_tensor, len_max_seq = data_masks(inputs_raw, item_tail=0)
 
-         # تبدیل به NumPy برای سازگاری با بقیه کد get_slice
-         # این بخش برای بهینگی بیشتر می‌تواند مستقیماً با تنسورها کار کند،
-         # اما نیازمند بازنویسی get_slice برای کار با تنسورهای PyTorch است.
-         self.inputs = inputs_tensor.numpy() # (num_samples, max_len)
-         # اصلاح برای رفع خطای TypeError: numpy() got an unexpected keyword argument 'dtype'
-         self.mask = mask_tensor.float().numpy() # ابتدا به float تبدیل کرده، سپس به NumPy
-                                                 # این کار mask (که bool بود) را به float32 تبدیل می‌کند
-                                                 # که با نحوه استفاده در get_slice (sum کردن) و model.py سازگار است.
-         self.len_max = len_max_seq          # حداکثر طول توالی در این داده
-         self.targets = np.asarray(cleaned_targets_raw, dtype=np.int64) # (num_samples,) dtype=np.int64 برای سازگاری با long در PyTorch
-         self.length = len(inputs_raw)       # تعداد کل نمونه‌ها (sessionها)
+         self.inputs = inputs_tensor.numpy()
+         self.mask = mask_tensor.float().numpy()
+         self.len_max = len_max_seq
+         self.targets = np.asarray(cleaned_targets_raw, dtype=np.int64)
+         self.length = len(inputs_raw)
          self.shuffle = shuffle
 
     def generate_batch(self, batch_size):
-        if self.length == 0: return [] # اگر داده‌ای وجود نداشته باشد
+        if self.length == 0: return []
 
         indices = np.arange(self.length)
         if self.shuffle:
@@ -213,41 +178,33 @@ class Data():
         for i in range(n_batch):
             start = i * batch_size
             end = min((i + 1) * batch_size, self.length)
-            if start < end: # فقط بچ‌های غیرخالی را اضافه کن
+            if start < end:
                 slices.append(indices[start:end])
         return slices
 
 
-    def get_slice(self, i_indices): # i_indices آرایه‌ای از اندیس‌ها برای بچ است
-        """
-        Gets a slice of data based on indices i_indices and prepares inputs for GNN.
-        این متد همچنان با آرایه‌های NumPy کار می‌کند و خروجی‌های آن نیز NumPy هستند.
-        تبدیل به تنسور GPU در تابع forward در model.py انجام می‌شود.
-        """
+    def get_slice(self, i_indices):
         inputs_original_seqs_batch = self.inputs[i_indices]
-        mask_slice_batch = self.mask[i_indices] # از __init__ به صورت float32 NumPy آمده است
+        mask_slice_batch = self.mask[i_indices]
         targets_slice_batch = self.targets[i_indices]
 
         current_batch_size = len(inputs_original_seqs_batch)
-        # از self.len_max که قبلا محاسبه شده و حداکثر طول در کل دیتاست است، استفاده می‌کنیم
-        # این باعث می‌شود alias_inputs_for_transformer_batch همیشه به یک اندازه ثابت پد شود
         current_max_seq_len = self.len_max
 
         session_unique_nodes_list = []
         max_n_node_in_batch = 0
 
         for k in range(current_batch_size):
-            actual_seq_len = int(mask_slice_batch[k].sum()) # mask_slice_batch float است
+            actual_seq_len = int(mask_slice_batch[k].sum())
             original_seq_k = inputs_original_seqs_batch[k][:actual_seq_len]
             unique_nodes_in_seq_k = np.unique(original_seq_k[original_seq_k > 0])
             session_unique_nodes_list.append(unique_nodes_in_seq_k)
             max_n_node_in_batch = max(max_n_node_in_batch, len(unique_nodes_in_seq_k))
 
         if max_n_node_in_batch == 0:
-             max_n_node_in_batch = 1 # حداقل یک بعد برای تنسورها لازم است
+             max_n_node_in_batch = 1
 
         items_for_gnn_batch = np.zeros((current_batch_size, max_n_node_in_batch), dtype=np.int64)
-        # alias_inputs_for_transformer_batch باید به اندازه current_max_seq_len پد شود
         alias_inputs_for_transformer_batch = np.zeros((current_batch_size, current_max_seq_len), dtype=np.int64)
         A_batch_list = []
 
@@ -260,9 +217,7 @@ class Data():
 
             node_map_session_k = {node_id: local_idx for local_idx, node_id in enumerate(unique_nodes_k)}
 
-            original_seq_padded_k = inputs_original_seqs_batch[k] # این به اندازه self.len_max پد شده است
-            # اطمینان از اینکه حلقه از طول current_max_seq_len تجاوز نمی‌کند
-            # (inputs_original_seqs_batch[k] و alias_inputs_for_transformer_batch[k] هر دو به طول self.len_max هستند)
+            original_seq_padded_k = inputs_original_seqs_batch[k]
             for j, item_id_original in enumerate(original_seq_padded_k[:current_max_seq_len]):
                 alias_inputs_for_transformer_batch[k, j] = node_map_session_k.get(item_id_original, 0)
 
@@ -304,6 +259,6 @@ class Data():
             alias_inputs_for_transformer_batch,
             A_batch_tensor,
             items_for_gnn_batch,
-            mask_slice_batch, # این همچنان float32 NumPy array است
+            mask_slice_batch,
             targets_slice_batch
         )

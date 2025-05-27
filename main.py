@@ -1,11 +1,12 @@
+# main.py
+
 import argparse
 import pickle
 import time
 import os
 # import random # اگر می‌خواهید نمونه‌برداری تصادفی انجام دهید، این را اضافه کنید
-from utils import Data, split_validation
-# model.py شامل SessionGraph, train_test است.
-from model import SessionGraph, train_test
+import utils # تغییر برای فراخوانی utils.build_graph_global
+from model import SessionGraph, train_test # model.py شامل SessionGraph, train_test است.
 import torch
 import numpy as np
 import torch.serialization # Added for add_safe_globals
@@ -20,7 +21,7 @@ parser.add_argument('--lr', type=float, default=0.001, help='learning rate')
 parser.add_argument('--lr_dc', type=float, default=0.1, help='learning rate decay rate')
 parser.add_argument('--lr_dc_step', type=int, default=3, help='the number of steps after which the learning rate decay')
 parser.add_argument('--l2', type=float, default=1e-5, help='l2 penalty')
-parser.add_argument('--step', type=int, default=1, help='gnn propogation steps')
+parser.add_argument('--step', type=int, default=1, help='gnn propogation steps') # برای GNN محلی
 parser.add_argument('--patience', type=int, default=10, help='the number of epoch to wait before early stop ')
 parser.add_argument('--nonhybrid', action='store_true', help='only use the global preference to predict')
 parser.add_argument('--validation', action='store_true', help='validation')
@@ -33,8 +34,9 @@ parser.add_argument('--nhead', type=int, default=2, help='number of heads in tra
 parser.add_argument('--nlayers', type=int, default=2, help='number of layers in transformer encoder')
 parser.add_argument('--ff_hidden', type=int, default=256, help='dimension of feedforward network model in transformer')
 parser.add_argument('--dropout', type=float, default=0.1, help='dropout rate in transformer')
-# --- آرگومان جدید برای مسیر چک‌پوینت ---
 parser.add_argument('--resume_from_checkpoint', type=str, default=None, help='Path to the checkpoint file to resume training from.')
+# --- آرگومان جدید برای لایه‌های GCN گلوبال ---
+parser.add_argument('--global_gcn_layers', type=int, default=1, help='Number of GCN layers for global graph embedding enrichment (0 to disable).')
 
 
 opt = parser.parse_args()
@@ -45,7 +47,6 @@ print(f"Using device: {device}")
 
 
 def main():
-    # --- (Your existing data loading and n_node calculation logic) ---
     base_dataset_path = './datasets/'
 
     if opt.dataset == 'sample':
@@ -93,7 +94,7 @@ def main():
             print("Error: Training data (potentially subsetted) is empty, cannot perform validation split.")
             return
         print(f"Splitting training data for validation (portion: {opt.valid_portion}) from {len(train_data_loaded[0])} samples.")
-        train_set_for_data_obj, valid_set_for_data_obj = split_validation(train_data_loaded, opt.valid_portion)
+        train_set_for_data_obj, valid_set_for_data_obj = utils.split_validation(train_data_loaded, opt.valid_portion)
         test_data_for_data_obj = valid_set_for_data_obj
         test_data_loaded_full = valid_set_for_data_obj
         print(f"Number of training samples after split: {len(train_set_for_data_obj[0])}")
@@ -136,43 +137,99 @@ def main():
         n_node = 43098
     elif opt.dataset == 'yoochoose1_64' or opt.dataset == 'yoochoose1_4':
         n_node = 37484
-    else:
+    else: # برای 'sample' یا هر دیتاست دیگری
         all_nodes = set()
-        if train_data_loaded_full and train_data_loaded_full[0]:
-            for session in train_data_loaded_full[0]:
+        # جمع‌آوری تمام نودها از کل دیتاست (آموزشی و تست قبل از data_subset_ratio)
+        # برای محاسبه n_node صحیح
+        temp_train_data = train_data_loaded_full
+        temp_test_data = None
+        if not opt.validation:
+            try:
+                with open(test_data_file, 'rb') as f: # خواندن فایل تست اصلی
+                     temp_test_data = pickle.load(f)
+            except:
+                temp_test_data = test_data_loaded_full # اگر خواندن فایل تست اصلی شکست خورد
+
+        if temp_train_data and temp_train_data[0]:
+            for session in temp_train_data[0]:
                 for item_wrapper in session:
                     item = item_wrapper[0] if isinstance(item_wrapper, list) and item_wrapper else item_wrapper
                     if isinstance(item, int) and item != 0: all_nodes.add(item)
-            for target_wrapper in train_data_loaded_full[1]:
+            for target_wrapper in temp_train_data[1]:
                 target = target_wrapper[0] if isinstance(target_wrapper, list) and target_wrapper else target_wrapper
                 if isinstance(target, int) and target != 0: all_nodes.add(target)
 
-        if not opt.validation and test_data_loaded_full and test_data_loaded_full[0]:
-            for session in test_data_loaded_full[0]:
+        if temp_test_data and temp_test_data[0]: # temp_test_data همان test_data_loaded_full است اگر opt.validation نباشد
+            for session in temp_test_data[0]:
                 for item_wrapper in session:
                     item = item_wrapper[0] if isinstance(item_wrapper, list) and item_wrapper else item_wrapper
                     if isinstance(item, int) and item != 0: all_nodes.add(item)
-            for target_wrapper in test_data_loaded_full[1]:
+            for target_wrapper in temp_test_data[1]:
                 target = target_wrapper[0] if isinstance(target_wrapper, list) and target_wrapper else target_wrapper
                 if isinstance(target, int) and target != 0: all_nodes.add(target)
         
         if not all_nodes:
              print("Critical Error: No nodes found in the full dataset. Cannot determine n_node.")
-             return
+             # اگر دیتاست نمونه کوچک است، n_node را بر اساس آن تعیین کنید
+             if opt.dataset == 'sample' and train_data_loaded_full: # یک مقدار پیش‌فرض برای نمونه
+                 all_nodes_sample = set()
+                 for session in train_data_loaded_full[0]:
+                    for item_wrapper in session:
+                        item = item_wrapper[0] if isinstance(item_wrapper, list) and item_wrapper else item_wrapper
+                        if isinstance(item, int) and item != 0: all_nodes_sample.add(item)
+                 for target_wrapper in train_data_loaded_full[1]:
+                    target = target_wrapper[0] if isinstance(target_wrapper, list) and target_wrapper else target_wrapper
+                    if isinstance(target, int) and target != 0: all_nodes_sample.add(target)
+                 if all_nodes_sample:
+                     n_node = max(all_nodes_sample) + 1
+                     print(f"Calculated n_node for 'sample' based on loaded data: {n_node}")
+                 else:
+                     print("Still no nodes for 'sample'. Setting n_node to a default of 1000 (placeholder).")
+                     n_node = 1000 # مقدار پیش‌فرض اگر دیتاست نمونه واقعا خالی باشد
+             else:
+                return # خروج اگر n_node قابل محاسبه نباشد
         else:
              n_node = max(all_nodes) + 1
         print(f"Calculated n_node based on FULL dataset: {n_node}")
 
+
     if n_node <= 1:
         print(f"Error: Invalid n_node calculated: {n_node}. Must be > 1.")
         return
+
+    # --- ساخت گراف گلوبال ---
+    global_adj_normalized = None
+    if opt.global_gcn_layers > 0 : # فقط اگر قرار است از GCN گلوبال استفاده شود
+        all_sessions_for_global_graph = []
+        # از داده‌های کامل آموزشی برای ساخت گراف گلوبال استفاده می‌کنیم
+        if train_data_loaded_full and train_data_loaded_full[0]:
+            all_sessions_for_global_graph.extend(train_data_loaded_full[0])
+        # اگر داده‌های تست در دسترس هستند و حالت ولیدیشن نیست، آن‌ها را هم اضافه می‌کنیم
+        # این بستگی به استراتژی شما دارد که آیا گراف گلوبال فقط از داده آموزشی ساخته شود یا خیر
+        # if not opt.validation and test_data_loaded_full and test_data_loaded_full[0]:
+        #     all_sessions_for_global_graph.extend(test_data_loaded_full[0])
+
+        if all_sessions_for_global_graph:
+            print(f"Building global graph using {len(all_sessions_for_global_graph)} sessions and n_node={n_node}...")
+            global_adj_normalized_np = utils.build_graph_global(all_sessions_for_global_graph, n_node)
+            # تبدیل به تنسور Torch разреженный (sparse) برای کارایی بهتر اگر n_node بزرگ است
+            # در اینجا از چگال استفاده می‌کنیم چون build_graph_global چگال برمی‌گرداند
+            # اگر build_graph_global بتواند ماتریس پراکنده scipy برگرداند، بهتر است.
+            global_adj_normalized = torch.from_numpy(global_adj_normalized_np).float() # به device بعدا در مدل منتقل می‌شود
+            print(f"Global graph built and normalized. Shape: {global_adj_normalized.shape}")
+        else:
+            print("Warning: No sessions available to build a global graph. Global graph will be None.")
+            opt.global_gcn_layers = 0 # غیرفعال کردن GCN گلوبال اگر گراف وجود ندارد
+    else:
+        print("Global GCN layers set to 0. Skipping global graph construction.")
+    # --- پایان ساخت گراف گلوبال ---
 
     train_data_obj = None
     test_data_obj_for_eval = None
 
     try:
         if train_set_for_data_obj[0]:
-            train_data_obj = Data(train_set_for_data_obj, shuffle=True)
+            train_data_obj = utils.Data(train_set_for_data_obj, shuffle=True)
             print(f"Training Data object created successfully with {len(train_data_obj.inputs)} samples.")
         else:
             print("Training data is empty. Training Data object not created.")
@@ -182,7 +239,7 @@ def main():
 
     try:
         if test_data_for_data_obj[0]:
-            test_data_obj_for_eval = Data(test_data_for_data_obj, shuffle=False)
+            test_data_obj_for_eval = utils.Data(test_data_for_data_obj, shuffle=False)
             print(f"Test/Validation Data object created successfully with {len(test_data_obj_for_eval.inputs)} samples.")
         else:
             print("Test/Validation data is empty. Test/Validation Data object not created.")
@@ -190,8 +247,9 @@ def main():
         print(f"Error creating Test/Validation Data object: {e}")
         return
     
-    model = SessionGraph(opt, n_node)
-    model.to(device)
+    # گراف گلوبال (ماتریس همسایگی نرمال شده) را به مدل پاس می‌دهیم
+    model = SessionGraph(opt, n_node, global_adj_matrix=global_adj_normalized)
+    model.to(device) # مدل و پارامترهایش (از جمله گراف گلوبال اگر به عنوان بافر ثبت شده) به دستگاه منتقل می‌شوند
 
     checkpoint_dir = f'./checkpoints/{opt.dataset}/'
     if not os.path.exists(checkpoint_dir):
@@ -199,46 +257,33 @@ def main():
         print(f"Created checkpoint directory: {checkpoint_dir}")
 
     start_epoch = 0
-    best_result = [0, 0, 0]
+    best_result = [0, 0, 0] # Recall, MRR, Precision
     best_epoch = [0, 0, 0]
     bad_counter = 0
 
-    # <<< --- MODIFIED CHECKPOINT LOADING --- >>>
     if opt.resume_from_checkpoint and os.path.exists(opt.resume_from_checkpoint):
         print(f"Resuming training from checkpoint: {opt.resume_from_checkpoint}")
         try:
-            # Add the potentially problematic NumPy type to safe globals temporarily
-            # You might need to add other types if more errors appear.
-            # This list can be extended based on future errors.
-            # Common ones often include various numpy scalar types.
             custom_safe_globals = [np.ScalarType, np._core.multiarray.scalar]
-            
-            # It's often safer to use the context manager if you only need it for this load
             with torch.serialization.safe_globals(custom_safe_globals):
                 checkpoint = torch.load(opt.resume_from_checkpoint, map_location=device, weights_only=False)
             
-            # If the above still causes issues with more numpy types, you might need to
-            # discover them and add to custom_safe_globals or use a broader approach if trusted:
-            # Example:
-            # import numpy
-            # all_numpy_scalars = [getattr(numpy, name) for name in dir(numpy) if isinstance(getattr(numpy, name), type) and issubclass(getattr(numpy, name), numpy.generic)]
-            # with torch.serialization.safe_globals(all_numpy_scalars):
-            #    checkpoint = torch.load(opt.resume_from_checkpoint, map_location=device, weights_only=False)
-
-
             model.load_state_dict(checkpoint['model_state_dict'])
-            model.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-            model.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-            start_epoch = checkpoint['epoch'] + 1
-            best_result = checkpoint.get('best_result', best_result) # Use .get for backward compatibility
-            # opt_loaded = checkpoint.get('opt', opt) # Be careful with loading opt, it might override current settings
+            # اطمینان از بارگذاری صحیح optimizer و scheduler اگر در چک‌پوینت ذخیره شده‌اند
+            if 'optimizer_state_dict' in checkpoint and hasattr(model, 'optimizer'):
+                model.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            if 'scheduler_state_dict' in checkpoint and hasattr(model, 'scheduler'):
+                model.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            
+            start_epoch = checkpoint.get('epoch', -1) + 1 # .get برای سازگاری
+            best_result = checkpoint.get('best_result', best_result)
+            # opt_loaded = checkpoint.get('opt', opt) # با احتیاط استفاده شود
             print(f"Successfully loaded checkpoint. Resuming from epoch {start_epoch}.")
-            print(f"Previous best result: {best_result}")
+            print(f"Previous best result: Recall@{20 if 'k_metric' not in opt else opt.k_metric}: {best_result[0]:.4f}, MRR@{20 if 'k_metric' not in opt else opt.k_metric}: {best_result[1]:.4f}")
 
         except RuntimeError as e:
             print(f"Error loading checkpoint: {e}. Starting training from scratch.")
             start_epoch = 0
-            # Potentially delete corrupted checkpoint or log the error more thoroughly
         except Exception as e:
             print(f"An unexpected error occurred while loading checkpoint: {e}. Starting training from scratch.")
             start_epoch = 0
@@ -247,12 +292,10 @@ def main():
             print(f"Checkpoint file not found at {opt.resume_from_checkpoint}. Starting training from scratch.")
         else:
             print("No checkpoint specified. Starting training from scratch.")
-    # <<< --- END OF MODIFIED CHECKPOINT LOADING --- >>>
-
 
     start_time = time.time()
 
-    for epoch_num in range(start_epoch, opt.epoch): # Start from start_epoch
+    for epoch_num in range(start_epoch, opt.epoch):
         print(f"{'-'*25} Epoch: {epoch_num} {'-'*25}")
 
         if train_data_obj is None or train_data_obj.length == 0:
@@ -262,34 +305,46 @@ def main():
                  return
             continue
 
-        if test_data_obj_for_eval is None or test_data_obj_for_eval.length == 0:
+        # ارزیابی روی داده تست/ولیدیشن
+        eval_data_obj = test_data_obj_for_eval
+        if eval_data_obj is None or eval_data_obj.length == 0:
             print(f"Epoch {epoch_num}: No test/validation data for evaluation. Metrics will be 0 or based on dummy evaluation if any.")
-            dummy_test_data_obj = Data(([],[]), shuffle=False) if test_data_obj_for_eval is None else test_data_obj_for_eval
-            recall, mrr, precision = train_test(model, train_data_obj, dummy_test_data_obj, opt)
-            if test_data_obj_for_eval is None or test_data_obj_for_eval.length == 0:
-                recall, mrr, precision = 0.0, 0.0, 0.0
+            # ایجاد یک Data object خالی برای جلوگیری از خطا در train_test
+            eval_data_obj = utils.Data(([],[]), shuffle=False) if eval_data_obj is None else eval_data_obj
+            
+        # تابع train_test هم آموزش و هم ارزیابی را انجام می‌دهد
+        # Recall@k, MRR@k, Precision@k (k معمولا 20 است)
+        metrics = train_test(model, train_data_obj, eval_data_obj, opt) # باید 3 مقدار برگرداند
+        
+        # اگر eval_data_obj واقعا خالی بود، متریک‌ها صفر می‌شوند
+        if test_data_obj_for_eval is None or test_data_obj_for_eval.length == 0:
+            recall, mrr, precision = 0.0, 0.0, 0.0
         else:
-            recall, mrr, precision = train_test(model, train_data_obj, test_data_obj_for_eval, opt)
+            recall, mrr, precision = metrics[0], metrics[1], metrics[2] # فرض بر این است که train_test سه مقدار برمیگرداند
 
         flag = 0
+        # فقط اگر داده ارزیابی معتبر وجود دارد، بهترین نتایج را به‌روزرسانی کن
         if test_data_obj_for_eval and test_data_obj_for_eval.length > 0:
-            if recall >= best_result[0]:
+            if recall >= best_result[0]: # فرض می‌کنیم recall اولین متریک است
                 best_result[0] = recall
                 best_epoch[0] = epoch_num
                 flag = 1
-            if mrr >= best_result[1]:
+            if mrr >= best_result[1]: # فرض می‌کنیم mrr دومین متریک است
                 best_result[1] = mrr
                 best_epoch[1] = epoch_num
                 flag = 1
-            if precision >= best_result[2]:
-                best_result[2] = precision
-                best_epoch[2] = epoch_num
-                flag = 1
-            print('Current Best Result (on available evaluation data):')
-            print(f'\tRecall@20: {best_result[0]:.4f}\tMRR@20: {best_result[1]:.4f}\tPrecision@20: {best_result[2]:.4f}\tEpochs: ({best_epoch[0]}, {best_epoch[1]}, {best_epoch[2]})')
+            # اگر precision هم دارید و می‌خواهید پایش کنید:
+            # if precision >= best_result[2]:
+            #     best_result[2] = precision
+            #     best_epoch[2] = epoch_num
+            #     flag = 1
+
+            # k_metric را از opt یا مقدار پیش‌فرض بگیرید
+            k_metric = getattr(opt, 'k_metric', 20) # فرض پیش‌فرض k=20
+            print(f'Current Best Result (on available evaluation data for k={k_metric}):')
+            print(f'\tRecall@{k_metric}: {best_result[0]:.4f}\tMRR@{k_metric}: {best_result[1]:.4f}\tEpochs: ({best_epoch[0]}, {best_epoch[1]})')
             
-            # Save model if it's the best on MRR (or your primary metric)
-            if flag == 1: # Or specifically check if mrr improved
+            if flag == 1: # اگر هر یک از بهترین نتایج بهبود یافت
                 best_model_save_path = os.path.join(checkpoint_dir, f'model_best.pth')
                 torch.save({
                     'epoch': epoch_num,
@@ -297,36 +352,25 @@ def main():
                     'optimizer_state_dict': model.optimizer.state_dict(),
                     'scheduler_state_dict': model.scheduler.state_dict(),
                     'best_result': best_result,
-                    'opt': opt # Saving opt is good for reproducibility
+                    'opt': opt
                 }, best_model_save_path)
                 print(f'Best model checkpoint saved to {best_model_save_path}')
 
             bad_counter += (1 - flag)
             if bad_counter >= opt.patience:
-                print(f"Early stopping triggered after {opt.patience} epochs without improvement.")
+                print(f"Early stopping triggered after {opt.patience} epochs without improvement on primary metrics.")
                 break
-        else:
-            print(f'Epoch {epoch_num} completed (no evaluation data). Recall: {recall:.4f}, MRR: {mrr:.4f}, Precision: {precision:.4f}')
-
-        # Save checkpoint for current epoch (optional, can take a lot of space)
-        # model_save_path = os.path.join(checkpoint_dir, f'model_epoch_{epoch_num}.pth')
-        # torch.save({
-        #     'epoch': epoch_num,
-        #     'model_state_dict': model.state_dict(),
-        #     'optimizer_state_dict': model.optimizer.state_dict(),
-        #     'scheduler_state_dict': model.scheduler.state_dict(),
-        #     'best_result': best_result,
-        #     'opt': opt
-        # }, model_save_path)
-        # print(f'Model checkpoint for epoch {epoch_num} saved to {model_save_path}')
+        else: # اگر داده ارزیابی وجود ندارد
+            print(f'Epoch {epoch_num} completed (no evaluation data). Recall: {recall:.4f}, MRR: {mrr:.4f}')
 
 
     print(f"{'-'*25} Training Finished {'-'*25}")
     end_time = time.time()
     print(f"Total Run time: {end_time - start_time:.2f} s")
     if test_data_obj_for_eval and test_data_obj_for_eval.length > 0:
-        print("Final Best Overall Result (on available evaluation data):")
-        print(f'\tRecall@20: {best_result[0]:.4f}\tMRR@20: {best_result[1]:.4f}\tPrecision@20: {best_result[2]:.4f}\tAchieved at Epochs: ({best_epoch[0]}, {best_epoch[1]}, {best_epoch[2]})')
+        k_metric = getattr(opt, 'k_metric', 20)
+        print(f"Final Best Overall Result (on available evaluation data for k={k_metric}):")
+        print(f'\tRecall@{k_metric}: {best_result[0]:.4f}\tMRR@{k_metric}: {best_result[1]:.4f}\tAchieved at Epochs: ({best_epoch[0]}, {best_epoch[1]})')
     else:
         print("Training finished (no evaluation data was available to determine best results).")
 
