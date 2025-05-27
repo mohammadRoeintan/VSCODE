@@ -268,7 +268,7 @@ def forward(model, i, data, is_train=True):
     if is_train and model.ssl_weight > 0:
         try:
             # Get last valid item embeddings
-            last_idx = torch.clamp(mask.sum(1) - 1, min=0)
+            last_idx = torch.clamp(mask.sum(1) - 1, min=0).long()
             ssl_base_emb = hidden[torch.arange(mask.size(0)), last_idx]
             
             # Create two views with dropout
