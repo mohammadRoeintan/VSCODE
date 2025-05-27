@@ -16,12 +16,12 @@ IR_TIMEZONE = pytz.timezone('Asia/Tehran')
 
 class GlobalGCN(Module):
     """
-    یک لایه GCN ساده برای گراف گلوبال با ماتریس پراکنده.
+    A simple GCN layer for the global graph with a sparse matrix.
     A_hat * X * W
-    A_hat: ماتریس همسایگی نرمال شده گلوبال پراکنده (N, N)
-    X: امبدینگ های ورودی آیتم ها (N, D_in)
-    W: ماتریس وزن قابل یادگیری (D_in, D_out)
-    خروجی: (N, D_out)
+    A_hat: Normalized global sparse adjacency matrix (N, N)
+    X: Input item embeddings (N, D_in)
+    W: Learnable weight matrix (D_in, D_out)
+    Output: (N, D_out)
     """
     def __init__(self, in_features, out_features, bias=False):
         super(GlobalGCN, self).__init__()
@@ -30,7 +30,20 @@ class GlobalGCN(Module):
     def forward(self, x, adj_sparse_matrix_normalized):
         # x: (N, in_features), adj_sparse_matrix_normalized: (N, N) sparse
         support = self.linear(x)  # X * W : (N, out_features)
-        # استفاده از torch.sparse.mm برای ضرب ماتریس پراکنده در چگال
+
+        # Ensure inputs to torch.sparse.mm are float32 when AMP is enabled
+        # The sparse matrix should ideally be created as float32 and kept that way.
+        # We primarily need to worry about 'support' if it got cast to Half by autocast.
+        if support.dtype == torch.half:
+            support = support.float() # Cast to float32
+        
+        # adj_sparse_matrix_normalized should be float32 from creation
+        # If not, ensure it is:
+        # if adj_sparse_matrix_normalized.dtype != torch.float32:
+        #     adj_sparse_matrix_normalized = adj_sparse_matrix_normalized.float()
+
+
+        # Use torch.sparse.mm for sparse matrix multiplication
         output = torch.sparse.mm(adj_sparse_matrix_normalized, support) # A_hat * X * W
         return output
 
