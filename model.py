@@ -8,12 +8,12 @@ from torch import nn
 from torch.nn import Module, Parameter
 import torch.nn.functional as F
 import copy
-from torch.cuda.amp import autocast, GradScaler 
+from torch.cuda.amp import autocast, GradScaler
 import pytz
-import utils 
-import argparse 
+import utils
+import argparse # اضافه شده برای استفاده در type hints
 
-IR_TIMEZONE = pytz.timezone('Asia/Tehran') 
+IR_TIMEZONE = pytz.timezone('Asia/Tehran')
 
 class GlobalGCN(Module):
     def __init__(self, in_features, out_features, bias=False):
@@ -25,13 +25,13 @@ class GlobalGCN(Module):
     def forward(self, x, adj_sparse_matrix_normalized):
         # This forward method will be called within a float32 context or with float32 inputs
         # from _get_enriched_item_embeddings
-        
+
         # x should be float32
         # adj_sparse_matrix_normalized should be float32 and coalesced
-        
+
         support = self.linear(x) # If x is float32, support should be float32
                                  # If self.linear was cast to .float(), its weights are float32.
-        
+
         output = torch.sparse.mm(adj_sparse_matrix_normalized, support)
         return output
 
@@ -47,7 +47,7 @@ class PositionalEncoding(Module):
         self.register_buffer('pe', pe)
 
     def forward(self, x):
-        x = x + self.pe[:x.size(1), :] 
+        x = x + self.pe[:x.size(1), :]
         return self.dropout(x)
 
 class GNN(Module):
@@ -79,7 +79,7 @@ class GNN(Module):
     def GNNCell(self, A, hidden):
         A_in = A[:, :, :A.size(1)]
         A_out = A[:, :, A.size(1): 2 * A.size(1)]
-        input_in = torch.matmul(A_in, self.linear_edge_in(hidden)) + self.b_iah 
+        input_in = torch.matmul(A_in, self.linear_edge_in(hidden)) + self.b_iah
         input_out = torch.matmul(A_out, self.linear_edge_out(hidden)) + self.b_oah
         inputs = torch.cat([input_in, input_out], 2)
         gi = F.linear(inputs, self.w_ih, self.b_ih)
@@ -113,7 +113,7 @@ class TargetAwareEncoderLayer(Module):
     def forward(self, src, src_key_padding_mask=None):
         src_norm = self.norm1(src)
         sa_output, _ = self.self_attn(src_norm, src_norm, src_norm,
-                                    attn_mask=None, 
+                                    attn_mask=None,
                                     key_padding_mask=src_key_padding_mask)
         src = src + self.dropout1(sa_output)
         src_norm = self.norm2(src)
@@ -137,7 +137,7 @@ class TargetAwareTransformerEncoder(Module):
         return output
 
 class SessionGraph(Module):
-    def __init__(self, opt, n_node, global_adj_sparse_matrix=None):
+    def __init__(self, opt: argparse.Namespace, n_node, global_adj_sparse_matrix=None):
         super(SessionGraph, self).__init__()
         self.hidden_size = opt.hiddenSize
         self.n_node = n_node
@@ -146,16 +146,16 @@ class SessionGraph(Module):
         self.ssl_temp = opt.ssl_temp
         self.ssl_dropout_rate = opt.ssl_dropout_rate
         self.num_global_gcn_layers_config = opt.global_gcn_layers
-        
+
         self.embedding = nn.Embedding(self.n_node, self.hidden_size, padding_idx=0)
-        
+
         self.use_global_graph = False
-        self.global_gcn_layers_module = None 
+        self.global_gcn_layers_module = None
         if self.num_global_gcn_layers_config > 0 and global_adj_sparse_matrix is not None:
             current_adj_for_buffer = global_adj_sparse_matrix
             if not current_adj_for_buffer.is_sparse:
                 current_adj_for_buffer = current_adj_for_buffer.to_sparse_coo()
-            
+
             if not current_adj_for_buffer.is_coalesced():
                 current_adj_for_buffer = current_adj_for_buffer.coalesce()
 
@@ -169,10 +169,9 @@ class SessionGraph(Module):
                 ).coalesce()
 
             self.register_buffer('global_adj_sparse_matrix_normalized', current_adj_for_buffer)
-            
+
             self.global_gcn_layers_module = nn.ModuleList()
             for _ in range(self.num_global_gcn_layers_config):
-                # GlobalGCN's linear layer will be float32 due to .float() in its __init__
                 self.global_gcn_layers_module.append(GlobalGCN(self.hidden_size, self.hidden_size))
             self.use_global_graph = True
             print(f"SessionGraph: Using {self.num_global_gcn_layers_config} global GCN layers. Sparse adj matrix shape: {self.global_adj_sparse_matrix_normalized.shape}, nnz: {self.global_adj_sparse_matrix_normalized._nnz()}, values_dtype: {self.global_adj_sparse_matrix_normalized.values().dtype}")
@@ -182,7 +181,7 @@ class SessionGraph(Module):
 
         self.gnn_local = GNN(self.hidden_size, step=opt.step)
         self.pos_encoder = PositionalEncoding(self.hidden_size, getattr(opt, 'dropout', 0.1))
-        
+
         ta_encoder_layer = TargetAwareEncoderLayer(
             d_model=self.hidden_size,
             nhead=getattr(opt, 'nhead', 2),
@@ -194,13 +193,13 @@ class SessionGraph(Module):
             num_layers=getattr(opt, 'nlayers', 2),
             norm=nn.LayerNorm(self.hidden_size)
         )
-        
+
         self.linear_one = nn.Linear(self.hidden_size, self.hidden_size, bias=True)
         self.linear_two = nn.Linear(self.hidden_size, self.hidden_size, bias=True)
         self.linear_three = nn.Linear(self.hidden_size, 1, bias=False)
         self.linear_transform = nn.Linear(self.hidden_size * 2, self.hidden_size, bias=True)
         self.linear_t = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
-        
+
         self.loss_function = nn.CrossEntropyLoss()
         self.reset_parameters()
 
@@ -214,54 +213,39 @@ class SessionGraph(Module):
                      with torch.no_grad():
                          param[self.embedding.padding_idx].fill_(0)
             elif 'weight_ih' in name or 'weight_hh' in name or \
-                 (param.dim() > 1 and 'weight' in name and 'global_gcn_layers_module' not in name): # Exclude GCN linear weights if handled separately
+                 (param.dim() > 1 and 'weight' in name and 'global_gcn_layers_module' not in name):
                 nn.init.xavier_uniform_(param)
             elif 'bias' in name or param.dim() == 1 :
                 nn.init.uniform_(param, -stdv, stdv)
-        
+
         if self.global_gcn_layers_module is not None:
             for gcn_layer in self.global_gcn_layers_module:
-                 # The .float() in GlobalGCN.__init__ handles its parameters.
-                 # If you want to re-initialize them here, ensure they remain float.
                  if hasattr(gcn_layer, 'linear') and hasattr(gcn_layer.linear, 'weight'):
-                      nn.init.xavier_uniform_(gcn_layer.linear.weight) # This will be on float32 params
+                      nn.init.xavier_uniform_(gcn_layer.linear.weight)
                       if gcn_layer.linear.bias is not None:
                            nn.init.zeros_(gcn_layer.linear.bias)
 
 
     def _get_enriched_item_embeddings(self):
-        all_item_initial_embeddings = self.embedding.weight # This could be Half if autocast is aggressive
-        
-        if self.use_global_graph and self.global_gcn_layers_module is not None:
-            # Temporarily disable autocast for this specific block to ensure float32 computation
-            # for the sparse operations.
-            with autocast(enabled=False): # Turn off autocast for this scope
-                current_embeddings_float32 = all_item_initial_embeddings.float() # Explicitly convert to float32
-                
-                adj_float32_coalesced = self.global_adj_sparse_matrix_normalized
-                # Adjacency matrix is already ensured to be float32 and coalesced in __init__
-                # and GlobalGCN.forward will also double check its inputs.
+        all_item_initial_embeddings = self.embedding.weight
 
+        if self.use_global_graph and self.global_gcn_layers_module is not None:
+            with autocast(enabled=False):
+                current_embeddings_float32 = all_item_initial_embeddings.float()
+                adj_float32_coalesced = self.global_adj_sparse_matrix_normalized
                 for gcn_layer in self.global_gcn_layers_module:
-                    # gcn_layer.forward is now robust to receive float32 and operate in float32
                     current_embeddings_float32 = gcn_layer(current_embeddings_float32, adj_float32_coalesced)
                     current_embeddings_float32 = F.relu(current_embeddings_float32)
-            
-            # After this block, current_embeddings_float32 is float32.
-            # If the outer autocast context (in train_test) is active and expects Half,
-            # subsequent operations on this tensor might be cast to Half by PyTorch.
             return current_embeddings_float32
         else:
-            # If not using global graph, return initial embeddings.
-            # Their type will be handled by the outer autocast context.
             return all_item_initial_embeddings
 
 
     def _process_session_graph_local(self, items_local_session_ids, A_local_session_adj, enriched_all_item_embeddings):
         hidden_local_session_enriched = F.embedding(
-            items_local_session_ids, 
-            enriched_all_item_embeddings, 
-            padding_idx=0 
+            items_local_session_ids,
+            enriched_all_item_embeddings,
+            padding_idx=0
         )
         hidden_local_session_processed = self.gnn_local(A_local_session_adj, hidden_local_session_enriched)
         return hidden_local_session_processed
@@ -278,7 +262,7 @@ class SessionGraph(Module):
         alpha_logits_masked = alpha_logits.masked_fill(mask_for_seq == 0, torch.finfo(alpha_logits.dtype).min)
         alpha = torch.softmax(alpha_logits_masked, dim=1)
         a = (alpha.unsqueeze(-1) * hidden_transformer_output * mask_float.unsqueeze(-1)).sum(1)
-        candidate_embeds = all_item_embeddings_for_scoring[1:]
+        candidate_embeds = all_item_embeddings_for_scoring[1:] # بدون آیتم پدینگ 0
 
         if self.nonhybrid:
             combined_session_rep = self.linear_transform(torch.cat([a, ht], dim=1))
@@ -294,19 +278,18 @@ class SessionGraph(Module):
         return scores
 
     def forward_model_logic(self, alias_inputs_local_ids, A_local_adj, items_local_ids, mask_for_seq, is_train=True):
-        # _get_enriched_item_embeddings now returns float32 if global GCN is used
-        enriched_all_item_embeddings = self._get_enriched_item_embeddings() 
-        
+        enriched_all_item_embeddings = self._get_enriched_item_embeddings()
+
         hidden_session_items_processed = self._process_session_graph_local(
             items_local_ids, A_local_adj, enriched_all_item_embeddings
         )
         seq_hidden_gnn_output = torch.gather(
-            hidden_session_items_processed, 
-            dim=1, 
+            hidden_session_items_processed,
+            dim=1,
             index=alias_inputs_local_ids.unsqueeze(-1).expand(-1, -1, self.hidden_size)
         )
         seq_hidden_with_pos = self.pos_encoder(seq_hidden_gnn_output)
-        src_key_padding_mask = (mask_for_seq == 0) 
+        src_key_padding_mask = (mask_for_seq == 0)
         output_transformer = self.transformer_encoder(
             src=seq_hidden_with_pos,
             src_key_padding_mask=src_key_padding_mask
@@ -318,7 +301,7 @@ class SessionGraph(Module):
             try:
                 last_idx_for_ssl = torch.clamp(mask_for_seq.sum(1) - 1, min=0).long()
                 batch_indices_ssl = torch.arange(mask_for_seq.size(0), device=seq_hidden_gnn_output.device)
-                last_idx_for_ssl = last_idx_for_ssl.to(seq_hidden_gnn_output.device)
+                last_idx_for_ssl = last_idx_for_ssl.to(seq_hidden_gnn_output.device) # Ensure device match
                 ssl_base_emb_seq = seq_hidden_gnn_output[batch_indices_ssl, last_idx_for_ssl]
                 ssl_emb1 = F.dropout(ssl_base_emb_seq, p=self.ssl_dropout_rate, training=True)
                 ssl_emb2 = F.dropout(ssl_base_emb_seq, p=self.ssl_dropout_rate, training=True)
@@ -332,7 +315,7 @@ class SessionGraph(Module):
         emb2_norm = F.normalize(emb2, p=2, dim=1)
         sim_matrix_12 = torch.matmul(emb1_norm, emb2_norm.t()) / temperature
         log_softmax_12 = F.log_softmax(sim_matrix_12, dim=1)
-        loss_12 = -torch.diag(log_softmax_12) 
+        loss_12 = -torch.diag(log_softmax_12)
         sim_matrix_21 = torch.matmul(emb2_norm, emb1_norm.t()) / temperature
         log_softmax_21 = F.log_softmax(sim_matrix_21, dim=1)
         loss_21 = -torch.diag(log_softmax_21)
@@ -346,17 +329,65 @@ def forward(model: SessionGraph, i_batch_indices, data_loader: utils.Data, is_tr
     items_local_ids = torch.from_numpy(items_local_np).long().to(current_device)
     mask_for_seq = torch.from_numpy(mask_seq_np).float().to(current_device)
     targets = torch.from_numpy(targets_np).long().to(current_device)
-    
-    # The forward_model_logic is called within the autocast context in train_test
+
     scores, ssl_loss = model.forward_model_logic(
         alias_inputs, A_local_adj, items_local_ids, mask_for_seq, is_train=is_train
     )
     return targets, scores, ssl_loss
 
+def evaluate_model_on_set(model: SessionGraph, eval_data: utils.Data, opt: argparse.Namespace, device: torch.device):
+    """
+    مدل را روی مجموعه داده ارزیابی (eval_data) ارزیابی می‌کند.
+    """
+    model.eval() # اطمینان از اینکه مدل در حالت ارزیابی است
+    k_metric = opt.k_metric
+    recall_at_k_list, mrr_at_k_list = [], []
+    # استفاده از AMP برای ارزیابی نیز می‌تواند سرعت را افزایش دهد و باید با آموزش سازگار باشد
+    use_amp_eval = torch.cuda.is_available() and device.type == 'cuda'
+
+
+    if eval_data is not None and eval_data.length > 0:
+        eval_batch_slices = eval_data.generate_batch(opt.batchSize)
+        if not eval_batch_slices:
+            print("Warning: No batches generated for evaluation data in evaluate_model_on_set.")
+            return 0.0, 0.0, 0.0
+
+        with torch.no_grad(): # غیرفعال کردن محاسبه گرادیان برای ارزیابی
+            for batch_indices_eval in eval_batch_slices:
+                with autocast(enabled=use_amp_eval):
+                    targets_eval, scores_eval, _ = forward(model, batch_indices_eval, eval_data, is_train=False)
+
+                targets_eval_cpu = targets_eval.cpu().numpy()
+                _, top_k_indices_0_based = scores_eval.topk(k_metric, dim=1)
+                top_k_item_ids = top_k_indices_0_based.cpu() + 1 # انتقال به CPU قبل از تبدیل به numpy
+                top_k_item_ids_np = top_k_item_ids.numpy()
+
+
+                for i in range(targets_eval_cpu.shape[0]):
+                    target_item_id = targets_eval_cpu[i]
+                    predicted_k_item_ids = top_k_item_ids_np[i]
+
+                    if target_item_id > 0 and target_item_id < model.n_node:
+                        if target_item_id in predicted_k_item_ids:
+                            recall_at_k_list.append(1)
+                            rank = np.where(predicted_k_item_ids == target_item_id)[0][0] + 1
+                            mrr_at_k_list.append(1.0 / rank)
+                        else:
+                            recall_at_k_list.append(0)
+                            mrr_at_k_list.append(0.0)
+    else:
+        print("Evaluation data is empty or None in evaluate_model_on_set.")
+        return 0.0, 0.0, 0.0
+
+    final_recall_at_k = np.mean(recall_at_k_list) * 100 if recall_at_k_list else 0.0
+    final_mrr_at_k = np.mean(mrr_at_k_list) * 100 if mrr_at_k_list else 0.0
+
+    return final_recall_at_k, final_mrr_at_k, 0.0 # precision_at_k فعلا 0 است
+
 def train_test(model: SessionGraph, train_data: utils.Data, eval_data: utils.Data, opt: argparse.Namespace):
-    use_amp = torch.cuda.is_available() # True if CUDA is available, False otherwise
-    scaler = GradScaler(enabled=use_amp) 
-    
+    use_amp = torch.cuda.is_available() and next(model.parameters()).device.type == 'cuda'
+    scaler = GradScaler(enabled=use_amp)
+
     model.train()
     total_loss_epoch = 0.0
     total_rec_loss_epoch = 0.0
@@ -366,20 +397,22 @@ def train_test(model: SessionGraph, train_data: utils.Data, eval_data: utils.Dat
 
     if num_train_batches > 0:
         for step, batch_indices in enumerate(train_batch_slices):
-            if not hasattr(model, 'optimizer'):
+            if not hasattr(model, 'optimizer'): # بررسی اینکه آیا بهینه‌ساز به مدل پیوست شده است
                 print("CRITICAL ERROR: model.optimizer is not set!")
-                return 0.0, 0.0, 0.0 
-            model.optimizer.zero_grad(set_to_none=True)
-            
-            with autocast(enabled=use_amp): # Autocast context for mixed precision
+                return 0.0, 0.0, 0.0 # یا یک exception ایجاد کنید
+            model.optimizer.zero_grad(set_to_none=True) # کارآمدتر از zero_grad() معمولی
+
+            with autocast(enabled=use_amp):
                 targets, scores, ssl_loss = forward(model, batch_indices, train_data, is_train=True)
                 valid_targets_mask = (targets > 0) & (targets < model.n_node)
-                rec_loss = torch.tensor(0.0, device=scores.device)
+                rec_loss = torch.tensor(0.0, device=scores.device) # اطمینان از اینکه روی همان دستگاه است
                 if valid_targets_mask.any():
+                    # اطمینان از اینکه اهداف برای loss_function در محدوده صحیح هستند (0 تا C-1)
                     target_values_0_based = (targets[valid_targets_mask] - 1).clamp(0, scores.size(1) - 1)
                     rec_loss = model.loss_function(scores[valid_targets_mask], target_values_0_based)
+
                 current_batch_loss = rec_loss + model.ssl_weight * ssl_loss
-            
+
             if use_amp:
                 scaler.scale(current_batch_loss).backward()
                 scaler.step(model.optimizer)
@@ -387,57 +420,34 @@ def train_test(model: SessionGraph, train_data: utils.Data, eval_data: utils.Dat
             else:
                 current_batch_loss.backward()
                 model.optimizer.step()
-            
+
             total_loss_epoch += current_batch_loss.item()
-            total_rec_loss_epoch += rec_loss.item()
-            total_ssl_loss_epoch += ssl_loss.item() if isinstance(ssl_loss, torch.Tensor) else ssl_loss
-            
+            total_rec_loss_epoch += rec_loss.item() # rec_loss ممکن است تنسور باشد اگر valid_targets_mask.any() False باشد
+            total_ssl_loss_epoch += ssl_loss.item() if isinstance(ssl_loss, torch.Tensor) else ssl_loss # ssl_loss ممکن است 0.0 باشد
+
             if (step + 1) % max(1, num_train_batches // 5) == 0 or step == num_train_batches - 1:
                 avg_total_loss = total_loss_epoch / (step + 1)
                 avg_rec_loss = total_rec_loss_epoch / (step + 1)
                 avg_ssl_loss = total_ssl_loss_epoch / (step + 1)
                 print(f'  Training Batch [{step + 1}/{num_train_batches}] '
                       f'Avg Total Loss: {avg_total_loss:.4f}, Avg Rec Loss: {avg_rec_loss:.4f}, Avg SSL Loss: {avg_ssl_loss:.4f}')
-    
-    if hasattr(model, 'scheduler'):
+
+    if hasattr(model, 'scheduler'): # بررسی اینکه آیا زمان‌بند به مدل پیوست شده است
         model.scheduler.step()
-    
-    model.eval()
-    k_metric = opt.k_metric 
+
+    model.eval() # تغییر حالت به ارزیابی
+    k_metric = opt.k_metric
     final_recall_at_k, final_mrr_at_k, final_precision_at_k = 0.0, 0.0, 0.0
 
+    # استفاده از تابع evaluate_model_on_set برای ارزیابی
     if eval_data is not None and eval_data.length > 0:
-        hit_at_k, mrr_at_k = [], []
-        eval_batch_slices = eval_data.generate_batch(opt.batchSize)
-        if eval_batch_slices:
-            with torch.no_grad():
-                for batch_indices_eval in eval_batch_slices:
-                    # Note: Evaluation is also done under autocast if use_amp is True.
-                    # This is generally fine and can speed up evaluation.
-                    # If issues arise, you could disable autocast for evaluation.
-                    with autocast(enabled=use_amp):
-                        targets_eval, scores_eval, _ = forward(model, batch_indices_eval, eval_data, is_train=False)
-                    
-                    _, top_k_indices_0_based = scores_eval.topk(k_metric, dim=1)
-                    top_k_item_ids = top_k_indices_0_based + 1 
-                    targets_eval_np = targets_eval.cpu().numpy()
-                    top_k_item_ids_np = top_k_item_ids.cpu().numpy()
-
-                    for i in range(targets_eval_np.shape[0]):
-                        target_item_id = targets_eval_np[i]
-                        predicted_k_item_ids = top_k_item_ids_np[i]
-                        if target_item_id > 0 and target_item_id < model.n_node:
-                            if target_item_id in predicted_k_item_ids:
-                                hit_at_k.append(1)
-                                rank = np.where(predicted_k_item_ids == target_item_id)[0][0] + 1
-                                mrr_at_k.append(1.0 / rank)
-                            else:
-                                hit_at_k.append(0)
-                                mrr_at_k.append(0.0)
-            if hit_at_k: final_recall_at_k = np.mean(hit_at_k) * 100
-            if mrr_at_k: final_mrr_at_k = np.mean(mrr_at_k) * 100
-        print(f'Evaluation Results @{k_metric}: Recall: {final_recall_at_k:.4f}%, MRR: {final_mrr_at_k:.4f}%')
+        current_device = next(model.parameters()).device # گرفتن دستگاه از مدل
+        recall_eval, mrr_eval, precision_eval = evaluate_model_on_set(model, eval_data, opt, current_device)
+        final_recall_at_k = recall_eval
+        final_mrr_at_k = mrr_eval
+        # final_precision_at_k = precision_eval # precision در حال حاضر در evaluate_model_on_set محاسبه نمی‌شود (0 برمی‌گرداند)
+        print(f'Evaluation Results @{k_metric} (during training): Recall: {final_recall_at_k:.4f}%, MRR: {final_mrr_at_k:.4f}%')
     else:
-        print("No evaluation data provided or evaluation data is empty. Skipping evaluation metrics calculation.")
-        
+        print("No evaluation data provided or evaluation data is empty during training. Skipping evaluation metrics calculation.")
+
     return final_recall_at_k, final_mrr_at_k, final_precision_at_k
