@@ -7,6 +7,7 @@ import scipy.sparse as sp # For creating and normalizing sparse matrices
 def build_graph_global_sparse(all_sessions_items, n_node):
     """
     Builds a global sparse adjacency matrix from all session items and normalizes it.
+    MODIFIED: Items within the same session are all interconnected to approximate hyperedge behavior.
     Returns a coalesced, normalized sparse adjacency matrix in PyTorch COO format.
     """
     adj_raw_scipy_coo = None
@@ -16,18 +17,29 @@ def build_graph_global_sparse(all_sessions_items, n_node):
         adj_raw_scipy_coo = sp.coo_matrix((n_node, n_node), dtype=np.float32)
     else:
         edges = []
+        # num_original_pairwise_edges = 0 # For debugging if needed
+        num_clique_edges = 0
+
         for session_items in all_sessions_items:
             cleaned_session = []
             for item_wrapper in session_items:
                 item_val = item_wrapper[0] if isinstance(item_wrapper, list) and item_wrapper else item_wrapper
                 if isinstance(item_val, int) and 0 < item_val < n_node: # item 0 is padding
                     cleaned_session.append(item_val)
-
-            for i in range(len(cleaned_session) - 1):
-                u, v = cleaned_session[i], cleaned_session[i+1]
-                edges.append((u, v))
-                edges.append((v, u)) # For an undirected graph
+            
+            # Add edges for all unique pairs in a session to form a clique (approximating hyperedge)
+            unique_items_in_session = sorted(list(set(cleaned_session))) # Ensure unique items and order for pair generation
+            for i in range(len(unique_items_in_session)):
+                for j in range(i + 1, len(unique_items_in_session)):
+                    u, v = unique_items_in_session[i], unique_items_in_session[j]
+                    # No need to check u != v because j starts from i + 1
+                    edges.append((u, v))
+                    edges.append((v, u))
+                    num_clique_edges +=1
         
+        # print(f"Global graph: Clique-based edges added: {num_clique_edges}")
+
+
         if not edges:
             print("Warning: No edges found for global graph from sessions (build_graph_global_sparse).")
             adj_raw_scipy_coo = sp.coo_matrix((n_node, n_node), dtype=np.float32)
@@ -38,7 +50,7 @@ def build_graph_global_sparse(all_sessions_items, n_node):
             data = np.ones(len(row), dtype=np.float32)
             # Create Scipy COO matrix, which handles duplicate indices by summing them
             adj_raw_scipy_coo = sp.coo_matrix((data, (row, col)), shape=(n_node, n_node), dtype=np.float32)
-            # print(f"Global graph (scipy): Found {adj_raw_scipy_coo.nnz / 2:.0f} unique undirected edges (approx, before self-loops) from sessions.")
+            # print(f"Global graph (scipy before unique): nnz {adj_raw_scipy_coo.nnz}")
 
     # Symmetrically normalize adjacency matrix: D^-0.5 * A_tilde * D^-0.5, where A_tilde = A + I
     adj_tilde = adj_raw_scipy_coo + sp.eye(adj_raw_scipy_coo.shape[0], dtype=np.float32) # Add self-loops
@@ -60,6 +72,7 @@ def build_graph_global_sparse(all_sessions_items, n_node):
     
     sparse_tensor = torch.sparse_coo_tensor(indices, values, shape, dtype=torch.float32)
     
+    # ** CRITICAL FIX: Coalesce the sparse tensor **
     return sparse_tensor.coalesce()
 
 
@@ -149,20 +162,19 @@ class Data():
 
          if len(inputs_raw) != len(targets_raw):
               raise ValueError(f"Number of sessions ({len(inputs_raw)}) does not match number of targets ({len(targets_raw)})")
-         
+
          cleaned_targets_raw = []
          for t_wrapper in targets_raw:
              t = t_wrapper[0] if isinstance(t_wrapper, list) and t_wrapper else t_wrapper
              if isinstance(t, (int, float)) and not np.isnan(t):
                  cleaned_targets_raw.append(int(t))
              else:
-                 cleaned_targets_raw.append(0) # Default for invalid targets
-
+                 cleaned_targets_raw.append(0) # Default for invalid targets (assuming 0 is padding)
 
          inputs_tensor, mask_tensor, len_max_seq = data_masks(inputs_raw, item_tail=0)
 
          self.inputs = inputs_tensor.numpy() # (num_samples, max_len)
-         self.mask = mask_tensor.float().numpy() # Mask converted to float32 numpy array
+         self.mask = mask_tensor.numpy().astype(np.float32) # Mask converted to float32 numpy array for get_slice
          self.len_max = len_max_seq          # Max sequence length in this data
          self.targets = np.asarray(cleaned_targets_raw, dtype=np.int64) # (num_samples,)
          self.length = len(inputs_raw)       # Total number of samples (sessions)
@@ -206,7 +218,7 @@ class Data():
             unique_nodes_in_seq_k = np.unique(original_seq_k[original_seq_k > 0])
             session_unique_nodes_list.append(unique_nodes_in_seq_k)
             max_n_node_in_batch = max(max_n_node_in_batch, len(unique_nodes_in_seq_k))
-        
+
         if max_n_node_in_batch == 0: # If all sessions in the batch are empty or only contain padding
              max_n_node_in_batch = 1 # Avoid zero-dimension tensors
 
@@ -214,7 +226,7 @@ class Data():
         items_for_gnn_batch = np.zeros((current_batch_size, max_n_node_in_batch), dtype=np.int64)
         # alias_inputs_for_transformer_batch: Local indices for reordering GNN output
         alias_inputs_for_transformer_batch = np.zeros((current_batch_size, current_max_seq_len), dtype=np.int64)
-        A_batch_list = [] # List to store local adjacency matrices (GraphSAGE compatible)
+        A_batch_list = [] # List to store local adjacency matrices
 
         for k in range(current_batch_size):
             unique_nodes_k = session_unique_nodes_list[k]
@@ -230,38 +242,50 @@ class Data():
             for j, item_id_original in enumerate(original_seq_padded_k[:current_max_seq_len]):
                 # Get local index for the original item ID, default to 0 (padding) if not in unique_nodes_k
                 alias_inputs_for_transformer_batch[k, j] = node_map_session_k.get(item_id_original, 0)
-            
-            # Build local adjacency matrix (unnormalized, for GraphSAGE) for the current session
-            # This matrix will be directed based on session sequence.
-            adj_session_k_unnormalized = np.zeros((num_unique_in_session_k, num_unique_in_session_k), dtype=np.float32)
+
+            # Build local adjacency matrix for the current session
+            adj_session_k_dense = np.zeros((num_unique_in_session_k, num_unique_in_session_k), dtype=np.float32)
             actual_seq_len_k = int(mask_slice_batch[k].sum())
             current_seq_local_indices_k = alias_inputs_for_transformer_batch[k, :actual_seq_len_k]
 
             for j in range(actual_seq_len_k - 1):
                 u_local_idx = current_seq_local_indices_k[j]
                 v_local_idx = current_seq_local_indices_k[j+1]
+                # Check if original items were valid (not padding)
                 original_u = inputs_original_seqs_batch[k, j]
                 original_v = inputs_original_seqs_batch[k, j+1]
 
                 if original_u > 0 and original_v > 0: # Ensure items are not padding
                     if u_local_idx < num_unique_in_session_k and v_local_idx < num_unique_in_session_k:
-                         adj_session_k_unnormalized[u_local_idx, v_local_idx] = 1.0 # Edge from u to v
-                         # To make it undirected (GraphSAGE often prefers this):
-                         # adj_session_k_unnormalized[v_local_idx, u_local_idx] = 1.0
+                         adj_session_k_dense[u_local_idx, v_local_idx] = 1.0 # Edge from u to v
 
-            # Pad local adjacency matrix to max_n_node_in_batch
-            padded_Adj_k = np.zeros((max_n_node_in_batch, max_n_node_in_batch), dtype=np.float32)
+            # Normalize local adjacency matrix (in-degree and out-degree normalization)
+            sum_in = np.sum(adj_session_k_dense, axis=0, keepdims=True)
+            sum_in[sum_in == 0] = 1 # Avoid division by zero
+            adj_in_norm_k = adj_session_k_dense / sum_in
+
+            sum_out = np.sum(adj_session_k_dense, axis=1, keepdims=True)
+            sum_out[sum_out == 0] = 1 # Avoid division by zero
+            adj_out_norm_k = adj_session_k_dense / sum_out
+
+            # Pad local adjacency matrices to max_n_node_in_batch
+            padded_A_in_k = np.zeros((max_n_node_in_batch, max_n_node_in_batch), dtype=np.float32)
+            padded_A_out_k = np.zeros((max_n_node_in_batch, max_n_node_in_batch), dtype=np.float32)
+
             if num_unique_in_session_k > 0:
-                padded_Adj_k[:num_unique_in_session_k, :num_unique_in_session_k] = adj_session_k_unnormalized
-            
-            A_batch_list.append(padded_Adj_k)
+                padded_A_in_k[:num_unique_in_session_k, :num_unique_in_session_k] = adj_in_norm_k
+                padded_A_out_k[:num_unique_in_session_k, :num_unique_in_session_k] = adj_out_norm_k
 
-        A_batch_tensor = np.array(A_batch_list, dtype=np.float32) # Shape: (batch_size, max_n_node, max_n_node)
+            # Concatenate A_in and A_out for GNN input
+            A_combined_k = np.concatenate([padded_A_in_k, padded_A_out_k], axis=1)
+            A_batch_list.append(A_combined_k)
+
+        A_batch_tensor = np.array(A_batch_list, dtype=np.float32)
 
         return (
             alias_inputs_for_transformer_batch, # Local indices for sequence items
-            A_batch_tensor,                     # Local GNN adjacency matrices (for GraphSAGE)
+            A_batch_tensor,                     # Local GNN adjacency matrices
             items_for_gnn_batch,                # Padded unique item IDs for local GNN
-            mask_slice_batch,                   # Mask for sequences
+            mask_slice_batch,                   # Mask for sequences (float32 from Data init)
             targets_slice_batch                 # Target item IDs
         )
