@@ -73,7 +73,7 @@ def objective(trial: optuna.Trial):
     """
     # 1. پیشنهاد هایپرپارامترها توسط Optuna
     lr = trial.suggest_float("lr", 1e-4, 1e-2, log=True)
-    hidden_size = trial.suggest_categorical("hiddenSize", [64, 100, 128]) # مطابق با نیاز تغییر دهید
+    hidden_size = trial.suggest_categorical("hiddenSize", [64, 100, 128,256]) # مطابق با نیاز تغییر دهید
     batch_size = trial.suggest_categorical("batchSize", [50, 100]) # اگر حافظه GPU اجازه می دهد
     
     # پارامترهای SSL
@@ -84,7 +84,7 @@ def objective(trial: optuna.Trial):
     # پارامترهای Transformer
     nhead = trial.suggest_categorical("nhead", [2, 4])
     nlayers = trial.suggest_categorical("nlayers", [1, 2])
-    # ff_hidden = trial.suggest_categorical("ff_hidden", [128, 256, 512])
+    ff_hidden = trial.suggest_categorical("ff_hidden", [128, 256, 512])
     # dropout_transformer = trial.suggest_float("dropout", 0.1, 0.3) # توجه: main.py یک آرگومان dropout کلی دارد
 
     # پارامترهای GNN
