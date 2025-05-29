@@ -22,9 +22,9 @@ print(opt)
 # torch.cuda.set_device(1)
 
 def main():
-    train_data = pickle.load(open('../datasets/' + opt.dataset + '/train.txt', 'rb'))
-    test_data = pickle.load(open('../datasets/' + opt.dataset + '/test.txt', 'rb'))
-    all_train = pickle.load(open('../datasets/' + opt.dataset + '/all_train_seq.txt', 'rb'))
+    train_data = pickle.load(open('./datasets/' + opt.dataset + '/train.txt', 'rb'))
+    test_data = pickle.load(open('./datasets/' + opt.dataset + '/test.txt', 'rb'))
+    all_train = pickle.load(open('./datasets/' + opt.dataset + '/train.txt', 'rb'))
     if opt.dataset == 'diginetica':
         n_node = 43097
     elif opt.dataset == 'Tmall':
