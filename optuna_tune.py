@@ -74,7 +74,7 @@ def objective(trial: optuna.Trial):
     # 1. پیشنهاد هایپرپارامترها توسط Optuna
     lr = trial.suggest_float("lr", 1e-4, 1e-2, log=True)
     hidden_size = trial.suggest_categorical("hiddenSize", [64, 100, 128, 256]) # مطابق با نیاز تغییر دهید
-    batch_size = trial.suggest_categorical("batchSize", [64, 128, 150 , 256]) # اگر حافظه GPU اجازه می دهد
+    batch_size = trial.suggest_categorical("batchSize", [ 128, 150 , 256]) # اگر حافظه GPU اجازه می دهد
     
     # پارامترهای SSL
     ssl_weight = trial.suggest_float("ssl_weight", 0.05, 0.3, log=True) # اگر از SSL استفاده می کنید
