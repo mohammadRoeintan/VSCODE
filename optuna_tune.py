@@ -73,8 +73,8 @@ def objective(trial: optuna.Trial):
     """
     # 1. پیشنهاد هایپرپارامترها توسط Optuna
     lr = trial.suggest_float("lr", 1e-4, 1e-2, log=True)
-    hidden_size = trial.suggest_categorical("hiddenSize", [64, 100, 128,256]) # مطابق با نیاز تغییر دهید
-    batch_size = trial.suggest_categorical("batchSize", [50, 100]) # اگر حافظه GPU اجازه می دهد
+    hidden_size = trial.suggest_categorical("hiddenSize", [64, 100, 128, 256]) # مطابق با نیاز تغییر دهید
+    batch_size = trial.suggest_categorical("batchSize", [64, 128, 150 , 256]) # اگر حافظه GPU اجازه می دهد
     
     # پارامترهای SSL
     ssl_weight = trial.suggest_float("ssl_weight", 0.05, 0.3, log=True) # اگر از SSL استفاده می کنید
@@ -95,7 +95,7 @@ def objective(trial: optuna.Trial):
     # بودجه برای این آزمایش (برای هرس سریعتر)
     # Pruner از این مقادیر برای تصمیم گیری استفاده می کند
     # شما می توانید تعداد epoch ها را به عنوان منبع (resource) در نظر بگیرید
-    epochs_for_this_trial = trial.suggest_int("epochs_for_trial", 5, 15) # تعداد کمتر برای آزمایش های اولیه سریع
+    epochs_for_this_trial = trial.suggest_int("epochs_for_trial", 5, 10) # تعداد کمتر برای آزمایش های اولیه سریع
     data_subset_for_this_trial = 0.05 # یا 0.1 - استفاده از ۵٪ یا ۱۰٪ داده ها
 
     # 2. ساخت دستور برای اجرای main.py
