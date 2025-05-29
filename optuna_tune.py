@@ -7,7 +7,7 @@ import re # برای استخراج متریک با عبارت منظم
 # --- تنظیمات اولیه ---
 PYTHON_EXECUTABLE = sys.executable # مسیر پایتون فعلی
 MAIN_SCRIPT_PATH = os.path.join(os.path.dirname(__file__), "main.py") # مسیر main.py
-DATASET_NAME = "yoochoose1_64"  # نام دیتاست خود را اینجا وارد کنید
+DATASET_NAME = "diginetica"  # نام دیتاست خود را اینجا وارد کنید
 K_METRIC_VALUE = 20      # مقدار K برای متریک ها (مطابق با main.py)
 N_TRIALS_OPTUNA = 30     # تعداد کل آزمایش های Optuna
 USE_VALIDATION = True    # آیا از مجموعه اعتبارسنجی استفاده شود (برای انتخاب بهترین مدل)
